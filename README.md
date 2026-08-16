@@ -69,8 +69,10 @@ failure.
 ## Configuration
 
 `~/.config/voicekey/config.toml` is a symlink to
-`apps/voicekey/hosts/<hostname>.toml`. Step 07 creates it, falling back to a
-copy of `config.example.toml` on a new host.
+`apps/voicekey/hosts/<hostname>.toml`. The machine hostnames match their
+Tailscale names: `desktop` for the desktop and `laptop` for the
+laptop. Step 07 creates the symlink, falling back to a copy of
+`config.example.toml` on a new host.
 
 Backends are selected by `[backend].type`:
 
