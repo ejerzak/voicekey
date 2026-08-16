@@ -1,0 +1,41 @@
+# voicekey config — per-host. Real configs live in apps/voicekey/hosts/<hostname>.toml
+# and are symlinked to ~/.config/voicekey/config.toml by install step 07.
+
+dictate_key = "KEY_F9"     # evdev key names; niri consumes these in binds.kdl
+agent_key   = "KEY_F10"
+language    = "en"
+min_seconds = 0.3          # discard shorter recordings (accidental taps)
+max_seconds = 90.0         # stuck-key safety: abort longer recordings
+
+[dictation]
+inject = "wtype"           # "wtype" (direct typing) | "clipboard" (wl-copy + ctrl+v)
+max_delay_seconds = 10.0   # older transcripts are copied, never typed late
+require_same_window = true # copy instead if niri focus changed during transcription
+
+[backend]
+type  = "faster-whisper"   # "faster-whisper" | "parakeet" | "remote"
+model = "large-v3-turbo"
+device = "cuda"            # faster-whisper: "cuda" | "cpu" | "auto"
+compute_type = "float16"   # cuda: float16; cpu: int8
+
+# parakeet (laptop, CPU): sherpa-onnx Parakeet model directory
+# type = "parakeet"
+# model_dir = "~/.local/share/voicekey/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"
+
+# remote (stub in v1): POST wav to another machine, get text back
+# type = "remote"
+# url = "http://desktop:9188/transcribe"
+
+[agent]
+# Hermes lives in an isolated tmux server, independent of Emacs and voicekey.
+# F10 opens Ghostty only if no terminal is already attached. Closing Ghostty
+# detaches from tmux without killing Hermes or losing its conversation.
+target = "hermes"
+tmux_socket = "voicekey-hermes"
+tmux_session = "voicekey-hermes"
+working_directory = "~/.local/share/voicekey/hermes"
+terminal = "ghostty"
+terminal_title = "Voicekey Hermes"
+open_terminal = true
+command_timeout = 10.0
+ready_timeout = 300.0       # wait rather than type into a busy/modal/draft TUI

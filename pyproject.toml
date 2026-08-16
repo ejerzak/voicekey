@@ -1,0 +1,30 @@
+[project]
+name = "voicekey"
+version = "0.1.0"
+description = "Global hold-to-talk dictation + agent dispatch for Wayland (evdev + PipeWire)"
+requires-python = ">=3.11"
+dependencies = [
+    "evdev>=1.6",
+]
+
+[project.optional-dependencies]
+# Desktop (NVIDIA): faster-whisper on CUDA. The nvidia-* wheels provide
+# cuBLAS/cuDNN 9 for ctranslate2 without a system CUDA install; the backend
+# preloads them from site-packages at startup.
+whisper = [
+    "faster-whisper>=1.1",
+    "nvidia-cublas-cu12",
+    "nvidia-cudnn-cu12>=9,<10",
+]
+# Laptop (CPU-only): NVIDIA Parakeet via sherpa-onnx.
+parakeet = [
+    "sherpa-onnx>=1.10",
+    "numpy",
+]
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["voicekey"]
