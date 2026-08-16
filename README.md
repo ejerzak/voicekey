@@ -58,13 +58,16 @@ the persistent Hermes session yourself without starting another Hermes:
 tmux -L voicekey-hermes attach-session -t voicekey-hermes
 ```
 
-Step 07 is the only voicekey stage that downloads model files. The daemon and
-`--check` load faster-whisper strictly from the local Hugging Face cache, so
-they fail quickly with a repair instruction instead of waiting on the network.
+Step 07 is the only voicekey stage that downloads model files. It downloads and
+atomically installs the configured Parakeet model on the laptop, and skips the
+download on later runs once all required model files are present. The daemon
+and `--check` never download model data themselves.
 
 `--check` exits 0 when fully ready, 2 when software/backend checks pass but no
-keyboard is readable, and 1 for a configuration, dependency, or backend
-failure.
+keyboard is readable, 3 when F9 dictation is ready but the configured F10 agent
+target is unavailable, and 1 for a configuration, core dependency, or backend
+failure. Install step 07 treats statuses 2 and 3 as warnings so a missing agent
+target does not prevent working dictation from being installed.
 
 ## Configuration
 

@@ -6,10 +6,28 @@ from __future__ import annotations
 import glob
 import logging
 import os
+import shutil
+import tarfile
+import tempfile
+import urllib.request
+from pathlib import Path
 
 from .config import BackendConfig
 
 log = logging.getLogger("voicekey.backends")
+
+PARAKEET_MODELS = {
+    "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8": (
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
+        "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2"
+    ),
+}
+PARAKEET_REQUIRED_FILES = (
+    "encoder.int8.onnx",
+    "decoder.int8.onnx",
+    "joiner.int8.onnx",
+    "tokens.txt",
+)
 
 
 class BackendUnavailable(Exception):
@@ -128,6 +146,98 @@ class ParakeetBackend:
         return stream.result.text.strip()
 
 
+def _parakeet_ready(model_dir: Path) -> bool:
+    return model_dir.is_dir() and all(
+        (model_dir / name).is_file() for name in PARAKEET_REQUIRED_FILES
+    )
+
+
+def _download(url: str, destination: Path) -> None:
+    print(f"downloading {url}")
+    with urllib.request.urlopen(url, timeout=30) as response:
+        try:
+            total = int(response.headers.get("Content-Length", "0"))
+        except (TypeError, ValueError):
+            total = 0
+        received = 0
+        next_report = 10
+        with destination.open("wb") as output:
+            while chunk := response.read(1024 * 1024):
+                output.write(chunk)
+                received += len(chunk)
+                if total:
+                    percent = received * 100 // total
+                    if percent >= next_report:
+                        print(f"  {min(percent, 100)}%", flush=True)
+                        next_report = (percent // 10 + 1) * 10
+
+
+def _extract_model(archive_path: Path, destination: Path) -> None:
+    """Extract a model archive after rejecting links and path traversal."""
+    root = destination.resolve()
+    # Stream the bzip2 archive: opening it in random-access mode would
+    # decompress the large encoder once to enumerate members and again to
+    # extract them.
+    with tarfile.open(archive_path, "r|bz2") as archive:
+        for member in archive:
+            member_path = (destination / member.name).resolve()
+            if not member_path.is_relative_to(root):
+                raise BackendUnavailable(
+                    f"parakeet archive contains an unsafe path: {member.name}"
+                )
+            if not (member.isfile() or member.isdir()):
+                raise BackendUnavailable(
+                    f"parakeet archive contains an unsupported entry: {member.name}"
+                )
+            # We have rejected traversal, links, devices, and other special
+            # entries, so retaining the model files' ordinary mode bits is safe.
+            archive.extract(member, destination, filter="fully_trusted")
+
+
+def _predownload_parakeet(cfg: BackendConfig) -> None:
+    model_dir = Path(os.path.expanduser(cfg.model_dir))
+    if not cfg.model_dir:
+        raise BackendUnavailable("parakeet backend.model_dir is empty")
+    if _parakeet_ready(model_dir):
+        print(f"model ready at {model_dir}")
+        return
+    if model_dir.exists():
+        raise BackendUnavailable(
+            f"parakeet model directory exists but is incomplete: {model_dir}"
+        )
+
+    model_name = model_dir.name
+    try:
+        url = PARAKEET_MODELS[model_name]
+    except KeyError:
+        raise BackendUnavailable(
+            f"no automatic download is defined for parakeet model {model_name!r}"
+        )
+
+    model_dir.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=f".{model_name}-", dir=model_dir.parent
+    ) as temporary:
+        staging = Path(temporary)
+        archive_path = staging / f"{model_name}.tar.bz2"
+        extracted = staging / "extracted"
+        extracted.mkdir()
+        _download(url, archive_path)
+        print("extracting model ...", flush=True)
+        _extract_model(archive_path, extracted)
+        candidate = extracted / model_name
+        if not _parakeet_ready(candidate):
+            missing = [
+                name for name in PARAKEET_REQUIRED_FILES
+                if not (candidate / name).is_file()
+            ]
+            raise BackendUnavailable(
+                f"downloaded parakeet archive is missing: {', '.join(missing)}"
+            )
+        shutil.move(str(candidate), str(model_dir))
+    print(f"model ready at {model_dir}")
+
+
 # --- remote (stub in v1) -----------------------------------------------------
 
 class RemoteBackend:
@@ -165,9 +275,6 @@ def predownload(cfg: BackendConfig) -> None:
         path = download_model(cfg.model)
         print(f"model ready at {path}")
     elif cfg.type == "parakeet":
-        print("parakeet: download a model archive from "
-              "https://github.com/k2-fsa/sherpa-onnx/releases (e.g. "
-              "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8), unpack it, and set "
-              "[backend] model_dir in config.toml")
+        _predownload_parakeet(cfg)
     else:
         print(f"backend {cfg.type}: nothing to download")

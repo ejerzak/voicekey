@@ -64,22 +64,32 @@ def check(cfg) -> int:
     )
 
     required = {
-        "hermes",
         "niri",
         "notify-send",
         "pw-record",
-        "systemd-run",
-        "tmux",
         "wl-copy",
-        "wtype",
     }
+    if cfg.dictation.inject == "wtype":
+        required.add("wtype")
+    agent_required = {"hermes", "systemd-run", "tmux"}
     if cfg.agent.open_terminal:
-        required.add(cfg.agent.terminal)
+        agent_required.add(cfg.agent.terminal)
     missing = sorted(command for command in required if shutil.which(command) is None)
+    agent_missing = sorted(
+        command for command in agent_required if shutil.which(command) is None
+    )
     for command in sorted(required - set(missing)):
         print(f"command: {command}: OK")
+    for command in sorted(agent_required - set(agent_missing)):
+        print(f"agent command: {command}: OK")
     if missing:
         print(f"missing command(s): {', '.join(missing)}", file=sys.stderr)
+    if agent_missing:
+        print(
+            "WARNING: agent target unavailable; missing command(s): "
+            f"{', '.join(agent_missing)}",
+            file=sys.stderr,
+        )
 
     keyboards, denied = [], 0
     for path in sorted(all_event_devices()):
@@ -117,7 +127,9 @@ def check(cfg) -> int:
     print("backend: OK")
     if missing:
         return 1
-    return 0 if keyboards else 2
+    if not keyboards:
+        return 2
+    return 3 if agent_missing else 0
 
 
 if __name__ == "__main__":
