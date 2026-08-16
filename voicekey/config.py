@@ -55,6 +55,8 @@ class AgentConfig:
 class Config:
     dictate_key: str = "KEY_F9"
     agent_key: str = "KEY_F10"
+    dictate_toggle_key: str = ""
+    agent_toggle_key: str = ""
     language: str = "en"
     min_seconds: float = 0.3
     max_seconds: float = 90.0
@@ -103,13 +105,29 @@ def _boolean(name: str, value: Any) -> bool:
 def _validate(cfg: Config) -> None:
     cfg.dictate_key = _string("dictate_key", cfg.dictate_key)
     cfg.agent_key = _string("agent_key", cfg.agent_key)
+    cfg.dictate_toggle_key = _string(
+        "dictate_toggle_key", cfg.dictate_toggle_key, allow_empty=True
+    )
+    cfg.agent_toggle_key = _string(
+        "agent_toggle_key", cfg.agent_toggle_key, allow_empty=True
+    )
     cfg.language = _string("language", cfg.language, allow_empty=True)
     cfg.min_seconds = _number("min_seconds", cfg.min_seconds)
     cfg.max_seconds = _number("max_seconds", cfg.max_seconds, minimum=0.1)
     if cfg.min_seconds >= cfg.max_seconds:
         raise ConfigError("min_seconds must be less than max_seconds")
-    if cfg.dictate_key == cfg.agent_key:
-        raise ConfigError("dictate_key and agent_key must differ")
+    configured_keys = [
+        key
+        for key in (
+            cfg.dictate_key,
+            cfg.agent_key,
+            cfg.dictate_toggle_key,
+            cfg.agent_toggle_key,
+        )
+        if key
+    ]
+    if len(configured_keys) != len(set(configured_keys)):
+        raise ConfigError("configured voice keys must differ")
 
     cfg.backend.type = _string("backend.type", cfg.backend.type)
     if cfg.backend.type not in BACKEND_TYPES:

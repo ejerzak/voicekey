@@ -1,12 +1,12 @@
-"""evdev listener across all keyboards.
+"""evdev listener across all devices that provide the configured keys.
 
 No EVIOCGRAB — the compositor still sees the held keys, so the bound keys must
-be inert in niri and apps (F9/F10 verified unbound in desktop/niri).
+be inert in niri and apps (see desktop/niri/binds.kdl).
 
-Handles: multiple keyboards, hotplug (periodic rescan — docks, BT), device
-disconnect mid-hold, and the no-permission case (user not in `input` group)
-by reporting once and retrying, so the daemon degrades gracefully instead of
-crash-looping."""
+Handles: full keyboards, separate laptop hotkey devices, hotplug (periodic
+rescan — docks, BT), device disconnect mid-hold, and the no-permission case
+(user not in `input` group) by reporting once and retrying, so the daemon
+degrades gracefully instead of crash-looping."""
 
 from __future__ import annotations
 
@@ -23,9 +23,9 @@ RESCAN_INTERVAL = 2.0
 NO_ACCESS_RETRY = 10.0
 
 
-def _is_keyboard(dev: InputDevice) -> bool:
+def _supports_any_key(dev: InputDevice, keycodes: set[int]) -> bool:
     keys = dev.capabilities().get(ecodes.EV_KEY, [])
-    return ecodes.KEY_A in keys
+    return not keycodes.isdisjoint(keys)
 
 
 def all_event_devices() -> set[str]:
@@ -41,7 +41,7 @@ class KeyboardListener:
                                              are filtered out here)
       on_device_lost(device_path)          — device vanished (may hold a key)
       on_tick()                            — every loop iteration (~1s max)
-      on_no_access(message)                — no readable keyboards (once per outage)
+      on_no_access(message)                — no readable key devices (once per outage)
     """
 
     def __init__(self, keycodes: set[int], on_key, on_device_lost, on_tick,
@@ -71,11 +71,11 @@ class KeyboardListener:
             except OSError:
                 continue
             try:
-                is_keyboard = _is_keyboard(dev)
+                is_relevant = _supports_any_key(dev, self.keycodes)
             except OSError:
                 dev.close()
                 continue
-            if is_keyboard:
+            if is_relevant:
                 self.devices[path] = dev
                 log.info("watching %s (%s)", path, dev.name)
             else:
@@ -84,7 +84,8 @@ class KeyboardListener:
             if denied and not self._no_access_reported:
                 self._no_access_reported = True
                 self.on_no_access(
-                    f"no readable keyboards ({denied} device(s) denied) — is "
+                    f"no readable devices for configured keys "
+                    f"({denied} device(s) denied) — is "
                     "the user in the 'input' group? "
                     "Fix: sudo usermod -aG input $USER, then re-login."
                 )

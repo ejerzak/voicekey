@@ -8,6 +8,12 @@ Hold **F10**, speak, release → the transcript is sent to a persistent Hermes
 TUI. This path is independent of Emacs and of the directory containing the
 focused application.
 
+On the laptop, the bare settings key (physical F9) toggles dictation: press
+once, speak, and press it again to stop. The bare Bluetooth key (physical F10)
+does the same for agent input. The firmware reports these media keys as
+instantaneous pulses even when physically held, so Fn+F9/F10 remain available
+for genuine hold-to-talk.
+
 On the first F10 dispatch, voicekey:
 
 1. starts a dedicated tmux server in a supervised systemd user unit;
@@ -105,8 +111,9 @@ the transcript is written to the recovery file.
   copy-without-paste.
 - `wtype` failure falls back to `wl-copy` plus simulated Ctrl+V. Terminal paste
   conventions differ, so direct `wtype` remains the default.
-- F9/F10 are consumed by no-op niri bindings but remain visible to the raw
-  evdev listener, preventing focused applications from also acting on them.
+- The configured Voicekey keys are consumed by no-op niri bindings but remain
+  visible to the raw evdev listener, preventing focused applications from also
+  acting on them.
 - Agent prompts are pasted only when the Hermes status is `ready` and its
   composer is empty. Voicekey will not type into an approval dialog or overwrite
   a textual draft.

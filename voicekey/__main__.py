@@ -49,15 +49,31 @@ def main() -> int:
 
 
 def check(cfg) -> int:
-    from evdev import InputDevice
+    from evdev import InputDevice, ecodes
 
     from .backends import BackendUnavailable, create_backend
-    from .listener import _is_keyboard, all_event_devices
+    from .listener import _supports_any_key, all_event_devices
+
+    key_names = (
+        cfg.dictate_key,
+        cfg.agent_key,
+        cfg.dictate_toggle_key,
+        cfg.agent_toggle_key,
+    )
+    keycodes = {
+        ecodes.ecodes[name] for name in key_names
+        if isinstance(ecodes.ecodes.get(name), int)
+    }
 
     print(
         f"keys: dictate={cfg.dictate_key} agent={cfg.agent_key} "
         f"inject={cfg.dictation.inject}"
     )
+    if cfg.dictate_toggle_key or cfg.agent_toggle_key:
+        print(
+            f"toggle keys: dictate={cfg.dictate_toggle_key or '(none)'} "
+            f"agent={cfg.agent_toggle_key or '(none)'}"
+        )
     print(
         f"agent: {cfg.agent.target} via tmux session={cfg.agent.tmux_session} "
         f"cwd={cfg.agent.working_directory}"
@@ -91,7 +107,7 @@ def check(cfg) -> int:
             file=sys.stderr,
         )
 
-    keyboards, denied = [], 0
+    key_devices, denied = [], 0
     for path in sorted(all_event_devices()):
         try:
             dev = InputDevice(path)
@@ -101,19 +117,19 @@ def check(cfg) -> int:
         except OSError:
             continue
         try:
-            if _is_keyboard(dev):
-                keyboards.append(f"{path} ({dev.name})")
+            if _supports_any_key(dev, keycodes):
+                key_devices.append(f"{path} ({dev.name})")
         except OSError:
             pass
         finally:
             dev.close()
-    for k in keyboards:
-        print(f"keyboard: {k}")
+    for device in key_devices:
+        print(f"key device: {device}")
     if denied:
         print(f"WARNING: {denied} input device(s) not readable — "
               "add user to 'input' group and re-login", file=sys.stderr)
-    if not keyboards:
-        print("WARNING: no readable keyboards found", file=sys.stderr)
+    if not key_devices:
+        print("WARNING: no readable devices provide the configured keys", file=sys.stderr)
 
     print(f"backend: {cfg.backend.type} ... loading")
     try:
@@ -127,7 +143,7 @@ def check(cfg) -> int:
     print("backend: OK")
     if missing:
         return 1
-    if not keyboards:
+    if not key_devices:
         return 2
     return 3 if agent_missing else 0
 

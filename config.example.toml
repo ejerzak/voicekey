@@ -3,6 +3,8 @@
 
 dictate_key = "KEY_F9"     # evdev key names; niri consumes these in binds.kdl
 agent_key   = "KEY_F10"
+dictate_toggle_key = ""    # optional pulse key: first press starts, second stops
+agent_toggle_key   = ""
 language    = "en"
 min_seconds = 0.3          # discard shorter recordings (accidental taps)
 max_seconds = 90.0         # stuck-key safety: abort longer recordings

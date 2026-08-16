@@ -7,6 +7,22 @@ from voicekey.config import Config
 from voicekey.daemon import Daemon, RecordingJob
 
 
+class FakeRecorder:
+    def __init__(self):
+        self.active = False
+        self.starts = 0
+        self.stops = 0
+
+    def start(self):
+        self.active = True
+        self.starts += 1
+
+    def stop(self):
+        self.active = False
+        self.stops += 1
+        return "unused.wav", 1.0
+
+
 class DaemonRoutingTests(unittest.TestCase):
     def setUp(self):
         self.daemon = Daemon(Config())
@@ -53,6 +69,49 @@ class DaemonRoutingTests(unittest.TestCase):
             job = RecordingJob("unused.wav", "agent", 1.0, None)
             self.daemon._process_recording(job)
         save.assert_called_once_with("hello")
+
+    @patch("voicekey.daemon.notify")
+    @patch("voicekey.daemon.focus.window_id", return_value=7)
+    def test_toggle_key_uses_two_presses_and_ignores_release(self, _focus, _notify):
+        cfg = Config(dictate_toggle_key="KEY_CONFIG")
+        daemon = Daemon(cfg)
+        daemon.recorder = FakeRecorder()
+        code = next(
+            code
+            for code, action in daemon.actions.items()
+            if action == ("dictate", "toggle")
+        )
+
+        daemon._on_key("/dev/input/event9", code, 1)
+        daemon._on_key("/dev/input/event9", code, 0)
+        self.assertTrue(daemon.recorder.active)
+        self.assertEqual(daemon.recorder.starts, 1)
+        self.assertEqual(daemon.recorder.stops, 0)
+
+        daemon._on_key("/dev/input/event9", code, 1)
+        self.assertFalse(daemon.recorder.active)
+        self.assertEqual(daemon.recorder.stops, 1)
+        self.assertEqual(daemon.recordings.get_nowait().action, "dictate")
+
+    @patch("voicekey.daemon.notify")
+    @patch("voicekey.daemon.focus.window_id", return_value=7)
+    def test_hold_key_starts_on_press_and_stops_on_release(self, _focus, _notify):
+        daemon = Daemon(Config())
+        daemon.recorder = FakeRecorder()
+        code = next(
+            code
+            for code, action in daemon.actions.items()
+            if action == ("dictate", "hold")
+        )
+
+        daemon._on_key("/dev/input/event3", code, 1)
+        self.assertTrue(daemon.recorder.active)
+        self.assertEqual(daemon.recorder.starts, 1)
+
+        daemon._on_key("/dev/input/event3", code, 0)
+        self.assertFalse(daemon.recorder.active)
+        self.assertEqual(daemon.recorder.stops, 1)
+        self.assertEqual(daemon.recordings.get_nowait().action, "dictate")
 
 
 if __name__ == "__main__":

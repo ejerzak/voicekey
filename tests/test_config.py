@@ -25,6 +25,17 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.agent.tmux_session, "voicekey-hermes")
         self.assertTrue(os.path.isabs(cfg.agent.working_directory))
 
+    def test_desktop_host_keeps_hold_keys_without_toggle_keys(self):
+        path = os.path.join(
+            os.path.dirname(__file__), "..", "hosts", "desktop.toml"
+        )
+        cfg = load(path)
+        self.assertEqual(cfg.backend.type, "faster-whisper")
+        self.assertEqual(cfg.dictate_key, "KEY_F9")
+        self.assertEqual(cfg.agent_key, "KEY_F10")
+        self.assertEqual(cfg.dictate_toggle_key, "")
+        self.assertEqual(cfg.agent_toggle_key, "")
+
     def test_numeric_string_is_rejected(self):
         with self.assertRaisesRegex(ConfigError, "max_seconds must be a number"):
             self._load_text('max_seconds = "90"\n')
@@ -50,6 +61,10 @@ class ConfigTests(unittest.TestCase):
     def test_recording_bounds_are_ordered(self):
         with self.assertRaisesRegex(ConfigError, "min_seconds must be less"):
             self._load_text("min_seconds = 2\nmax_seconds = 1\n")
+
+    def test_voice_keys_must_be_unique(self):
+        with self.assertRaisesRegex(ConfigError, "configured voice keys must differ"):
+            self._load_text('dictate_toggle_key = "KEY_F9"\n')
 
 
 if __name__ == "__main__":

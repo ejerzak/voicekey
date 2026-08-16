@@ -30,6 +30,8 @@ from .recorder import Recorder, RecordingError
 log = logging.getLogger("voicekey.daemon")
 
 ACTION_LABEL = {"dictate": "dictation", "agent": "agent"}
+HOLD = "hold"
+TOGGLE = "toggle"
 TRANSCRIPTION_QUEUE_SIZE = 4
 AGENT_QUEUE_SIZE = 8
 
@@ -65,10 +67,14 @@ def fix_environment() -> None:
 class Daemon:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
-        self.actions = {
-            _keycode(cfg.dictate_key): "dictate",
-            _keycode(cfg.agent_key): "agent",
+        self.actions: dict[int, tuple[str, str]] = {
+            _keycode(cfg.dictate_key): ("dictate", HOLD),
+            _keycode(cfg.agent_key): ("agent", HOLD),
         }
+        if cfg.dictate_toggle_key:
+            self.actions[_keycode(cfg.dictate_toggle_key)] = ("dictate", TOGGLE)
+        if cfg.agent_toggle_key:
+            self.actions[_keycode(cfg.agent_toggle_key)] = ("agent", TOGGLE)
         self.recorder = Recorder()
         self.session_action: str | None = None
         self.session_code: int | None = None
@@ -112,40 +118,38 @@ class Daemon:
                 "voicekey: no keyboard access", msg, error=True
             ),
         )
-        log.info(
-            "listening: %s=dictate, %s=agent",
-            self.cfg.dictate_key,
-            self.cfg.agent_key,
-        )
+        descriptions = [
+            f"{self.cfg.dictate_key}=dictate(hold)",
+            f"{self.cfg.agent_key}=agent(hold)",
+        ]
+        if self.cfg.dictate_toggle_key:
+            descriptions.append(f"{self.cfg.dictate_toggle_key}=dictate(toggle)")
+        if self.cfg.agent_toggle_key:
+            descriptions.append(f"{self.cfg.agent_toggle_key}=agent(toggle)")
+        log.info("listening: %s", ", ".join(descriptions))
         listener.run()
 
     # Listener callbacks run on the main thread.
 
     def _on_key(self, device_path: str, code: int, value: int) -> None:
-        action = self.actions[code]
+        action, behavior = self.actions[code]
+        if behavior == TOGGLE:
+            if value == 0:
+                return
+            if self.recorder.active:
+                if code == self.session_code and device_path == self.session_device:
+                    self._finish()
+                else:
+                    log.debug("ignoring %s toggle: already recording", action)
+                return
+            self._start(device_path, code, action, "press again to stop")
+            return
+
         if value == 1:
             if self.recorder.active:
                 log.debug("ignoring %s press: already recording", action)
                 return
-            try:
-                self.recorder.start()
-            except OSError as exc:
-                notify("voicekey: recording failed", str(exc), error=True)
-                return
-            self.session_action = action
-            self.session_code = code
-            self.session_device = device_path
-            self.session_window_id = (
-                focus.window_id()
-                if action == "dictate" and self.cfg.dictation.require_same_window
-                else None
-            )
-            notify(
-                f"● Recording ({ACTION_LABEL[action]})",
-                "release to stop",
-                ms=60000,
-                channel=action,
-            )
+            self._start(device_path, code, action, "release to stop")
         else:
             if (
                 not self.recorder.active
@@ -154,6 +158,29 @@ class Daemon:
             ):
                 return
             self._finish()
+
+    def _start(
+        self, device_path: str, code: int, action: str, stop_instruction: str
+    ) -> None:
+        try:
+            self.recorder.start()
+        except OSError as exc:
+            notify("voicekey: recording failed", str(exc), error=True)
+            return
+        self.session_action = action
+        self.session_code = code
+        self.session_device = device_path
+        self.session_window_id = (
+            focus.window_id()
+            if action == "dictate" and self.cfg.dictation.require_same_window
+            else None
+        )
+        notify(
+            f"● Recording ({ACTION_LABEL[action]})",
+            stop_instruction,
+            ms=60000,
+            channel=action,
+        )
 
     def _clear_session(self) -> tuple[str | None, int | None]:
         action, window_id = self.session_action, self.session_window_id
