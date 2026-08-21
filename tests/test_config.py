@@ -22,6 +22,7 @@ class ConfigTests(unittest.TestCase):
         cfg = load(path)
         self.assertEqual(cfg.dictation.inject, "wtype")
         self.assertEqual(cfg.agent.target, "hermes")
+        self.assertEqual(cfg.agent.transport, "local")
         self.assertEqual(cfg.agent.tmux_session, "voicekey-hermes")
         self.assertTrue(os.path.isabs(cfg.agent.working_directory))
 
@@ -35,6 +36,25 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.agent_key, "KEY_F10")
         self.assertEqual(cfg.dictate_toggle_key, "")
         self.assertEqual(cfg.agent_toggle_key, "")
+        self.assertEqual(cfg.agent.transport, "local")
+
+    def test_laptop_uses_remote_desktop_hermes(self):
+        path = os.path.join(
+            os.path.dirname(__file__), "..", "hosts", "laptop.toml"
+        )
+        cfg = load(path)
+        self.assertEqual(cfg.agent.transport, "ssh-over-tailscale")
+        self.assertEqual(cfg.agent.remote_host, "desktop")
+        self.assertEqual(cfg.agent.remote_user, "alice")
+        self.assertTrue(cfg.agent.identity_file.endswith("/.ssh/id_ed25519"))
+
+    def test_remote_transport_requires_host_and_user(self):
+        with self.assertRaisesRegex(ConfigError, "agent.remote_host"):
+            self._load_text('[agent]\ntransport = "ssh-over-tailscale"\n')
+
+    def test_remote_fields_are_rejected_for_local_transport(self):
+        with self.assertRaisesRegex(ConfigError, "require agent.transport"):
+            self._load_text('[agent]\nremote_host = "desktop.example"\n')
 
     def test_numeric_string_is_rejected(self):
         with self.assertRaisesRegex(ConfigError, "max_seconds must be a number"):

@@ -12,7 +12,12 @@ from typing import Any
 DEFAULT_PATH = os.path.expanduser("~/.config/voicekey/config.toml")
 BACKEND_TYPES = {"faster-whisper", "parakeet", "remote"}
 AGENT_TARGETS = {"hermes"}
+AGENT_TRANSPORTS = {"local", "ssh-over-tailscale"}
 TMUX_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,48}$")
+REMOTE_HOST_RE = re.compile(
+    r"^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$"
+)
+REMOTE_USER_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 
 
 class ConfigError(Exception):
@@ -41,6 +46,10 @@ class AgentConfig:
     """Persistent Hermes target; future targets implement the same seam."""
 
     target: str = "hermes"
+    transport: str = "local"
+    remote_host: str = ""
+    remote_user: str = ""
+    identity_file: str = ""
     tmux_socket: str = "voicekey-hermes"
     tmux_session: str = "voicekey-hermes"
     working_directory: str = "~/.local/share/voicekey/hermes"
@@ -160,6 +169,45 @@ def _validate(cfg: Config) -> None:
         raise ConfigError(
             f"agent.target must be one of {', '.join(sorted(AGENT_TARGETS))}, "
             f"got {cfg.agent.target!r}"
+        )
+    cfg.agent.transport = _string("agent.transport", cfg.agent.transport)
+    if cfg.agent.transport not in AGENT_TRANSPORTS:
+        raise ConfigError(
+            "agent.transport must be one of "
+            f"{', '.join(sorted(AGENT_TRANSPORTS))}, "
+            f"got {cfg.agent.transport!r}"
+        )
+    cfg.agent.remote_host = _string(
+        "agent.remote_host", cfg.agent.remote_host, allow_empty=True
+    )
+    cfg.agent.remote_user = _string(
+        "agent.remote_user", cfg.agent.remote_user, allow_empty=True
+    )
+    cfg.agent.identity_file = _string(
+        "agent.identity_file", cfg.agent.identity_file, allow_empty=True
+    )
+    if cfg.agent.transport == "ssh-over-tailscale":
+        if not REMOTE_HOST_RE.fullmatch(cfg.agent.remote_host):
+            raise ConfigError(
+                "agent.remote_host must be a MagicDNS name for "
+                "ssh-over-tailscale"
+            )
+        if not REMOTE_USER_RE.fullmatch(cfg.agent.remote_user):
+            raise ConfigError(
+                "agent.remote_user must be a Linux user name for "
+                "ssh-over-tailscale"
+            )
+        if not cfg.agent.identity_file:
+            raise ConfigError(
+                "agent.identity_file is required for ssh-over-tailscale"
+            )
+        cfg.agent.identity_file = os.path.abspath(
+            os.path.expanduser(cfg.agent.identity_file)
+        )
+    elif cfg.agent.remote_host or cfg.agent.remote_user or cfg.agent.identity_file:
+        raise ConfigError(
+            "agent remote fields require "
+            "agent.transport = 'ssh-over-tailscale'"
         )
     for name in ("tmux_socket", "tmux_session"):
         value = _string(f"agent.{name}", getattr(cfg.agent, name))

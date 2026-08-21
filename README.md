@@ -6,7 +6,9 @@ window, voicekey copies the transcript instead of typing it somewhere wrong.
 
 Hold **F10**, speak, release → the transcript is sent to a persistent Hermes
 TUI. This path is independent of Emacs and of the directory containing the
-focused application.
+focused application. On `desktop`, Hermes is local. On `laptop`,
+recording and transcription stay local, while the transcript and terminal
+connection go to `desktop` over OpenSSH routed through Tailscale.
 
 On the laptop, the bare settings key (physical F9) toggles dictation: press
 once, speak, and press it again to stop. The bare Bluetooth key (physical F10)
@@ -16,10 +18,11 @@ for genuine hold-to-talk.
 
 On the first F10 dispatch, voicekey:
 
-1. starts a dedicated tmux server in a supervised systemd user unit;
-2. starts `hermes --tui` in a named tmux session and a neutral working directory;
-3. opens a Ghostty window attached to that session; and
-4. waits for Hermes's composer to be idle and empty before submitting the prompt.
+1. connects to the configured local or remote host;
+2. starts a dedicated tmux server in a supervised systemd user unit;
+3. starts `hermes --tui` in a named tmux session and a neutral working directory;
+4. opens a local Ghostty window attached to that session; and
+5. waits for Hermes's composer to be idle and empty before submitting the prompt.
 
 Later F10 dispatches reuse the same Hermes process and conversation. If its
 Ghostty window is open, voicekey does not open another. If the window was
@@ -34,10 +37,25 @@ later dictation.
 
 ## Install
 
-Hermes must already be installed as `hermes`. The default agent UI also needs
-tmux, systemd-run, and Ghostty. Fedora's package list installs tmux and Ghostty;
-on Debian/Ubuntu, install Ghostty separately if the distribution does not
-package it.
+Hermes, tmux, and systemd-run must exist on the configured Hermes host. The
+Voicekey machine needs Ghostty; remote mode additionally needs Tailscale and
+OpenSSH. Fedora's package list installs tmux and Ghostty; on Debian/Ubuntu,
+install Ghostty separately if the distribution does not package it.
+
+For the laptop's remote transport, run the standard OpenSSH server on
+`desktop`. Tailscale's built-in SSH server is deliberately disabled
+because Fedora's SELinux policy can prevent it from operating:
+
+```sh
+sudo tailscale set --ssh=false
+sudo systemctl enable --now sshd
+```
+
+The laptop's public SSH key must be authorized for `alice` on `desktop`,
+and its `known_hosts` file must contain the desktop's verified host key. The
+tailnet access policy must also allow the laptop to reach port 22. Voicekey
+uses the configured `identity_file` noninteractively and fails closed on an
+unknown or changed host key.
 
 ```sh
 install/install.sh 02-dnf       # or 02-apt
@@ -55,10 +73,11 @@ Diagnostics:
 journalctl --user -u voicekey
 tmux -L voicekey-hermes has-session -t voicekey-hermes
 systemctl --user status voicekey-voicekey-hermes-tmux.service
+ssh -F /dev/null -o 'ProxyCommand=tailscale nc %h %p' alice@desktop
 ```
 
-The last two commands become meaningful after the first F10 dispatch. To open
-the persistent Hermes session yourself without starting another Hermes:
+The tmux and systemd commands become meaningful after the first F10 dispatch.
+To open the persistent Hermes session yourself without starting another Hermes:
 
 ```sh
 tmux -L voicekey-hermes attach-session -t voicekey-hermes
@@ -91,10 +110,14 @@ Backends are selected by `[backend].type`:
 | `parakeet` | laptop | CPU via sherpa-onnx; still untested; set `model_dir` |
 | `remote` | optional | configuration seam only; deliberately unimplemented |
 
-`[agent].working_directory` is deliberately neutral. Hermes retains its own
-session and memory, but a general voice command does not accidentally inherit
-the focused editor's repository. `[agent].target` is the adapter seam for
-future agents; the implemented target is currently only `hermes`.
+`[agent].transport` is `local` on the desktop and `ssh-over-tailscale` on the
+laptop. The remote transport runs Hermes and its persistent tmux server on
+`remote_user@remote_host`, but always opens Ghostty on the machine where F10
+was pressed. `[agent].working_directory` is deliberately neutral. Hermes
+retains its own session and memory, but a general voice command does not
+accidentally inherit the focused editor's repository. `[agent].target` is the
+adapter seam for future agents; the implemented target is currently only
+`hermes`.
 
 `ready_timeout` controls how long an F10 transcript waits while Hermes is busy,
 showing a modal, or contains a manually typed draft. Later F10 transcripts stay
@@ -123,6 +146,10 @@ the transcript is written to the recovery file.
   neutralized for voice input. Control whitespace is collapsed.
 - Agent transcript text goes to tmux over stdin, not command arguments or the
   journal.
+- Remote commands use OpenSSH public-key authentication with strict host-key
+  checking. Tailscale supplies the private network path but does not replace
+  SSH authentication. The interactive Ghostty client allocates a real remote
+  PTY.
 - If delivery fails, the last undelivered transcript is saved mode 0600 at
   `~/.local/state/voicekey/last-recovery.txt`.
 - Dictation and agent notifications use separate replacement IDs.

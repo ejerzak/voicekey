@@ -33,6 +33,12 @@ compute_type = "float16"   # cuda: float16; cpu: int8
 # F10 opens Ghostty only if no terminal is already attached. Closing Ghostty
 # detaches from tmux without killing Hermes or losing its conversation.
 target = "hermes"
+transport = "local"
+# For a remote Hermes TUI instead:
+# transport = "ssh-over-tailscale"
+# remote_host = "desktop"
+# remote_user = "you"
+# identity_file = "~/.ssh/id_ed25519"
 tmux_socket = "voicekey-hermes"
 tmux_session = "voicekey-hermes"
 working_directory = "~/.local/share/voicekey/hermes"

@@ -75,9 +75,14 @@ def check(cfg) -> int:
             f"agent={cfg.agent_toggle_key or '(none)'}"
         )
     print(
-        f"agent: {cfg.agent.target} via tmux session={cfg.agent.tmux_session} "
+        f"agent: {cfg.agent.target} transport={cfg.agent.transport} "
+        f"tmux session={cfg.agent.tmux_session} "
         f"cwd={cfg.agent.working_directory}"
     )
+    if cfg.agent.transport == "ssh-over-tailscale":
+        print(
+            f"agent remote: {cfg.agent.remote_user}@{cfg.agent.remote_host}"
+        )
 
     required = {
         "niri",
@@ -87,7 +92,11 @@ def check(cfg) -> int:
     }
     if cfg.dictation.inject == "wtype":
         required.add("wtype")
-    agent_required = {"hermes", "systemd-run", "tmux"}
+    agent_required = {"systemd-run"}
+    if cfg.agent.transport == "ssh-over-tailscale":
+        agent_required.update({"niri", "ssh", "tailscale"})
+    else:
+        agent_required.update({"hermes", "tmux"})
     if cfg.agent.open_terminal:
         agent_required.add(cfg.agent.terminal)
     missing = sorted(command for command in required if shutil.which(command) is None)
@@ -106,6 +115,18 @@ def check(cfg) -> int:
             f"{', '.join(agent_missing)}",
             file=sys.stderr,
         )
+    agent_error = None
+    if not agent_missing:
+        from .agent import check_target
+
+        agent_error = check_target(cfg.agent)
+        if agent_error:
+            print(
+                "WARNING: agent target unavailable: " + agent_error,
+                file=sys.stderr,
+            )
+        elif cfg.agent.transport == "ssh-over-tailscale":
+            print("agent remote target: OK")
 
     key_devices, denied = [], 0
     for path in sorted(all_event_devices()):
@@ -145,7 +166,7 @@ def check(cfg) -> int:
         return 1
     if not key_devices:
         return 2
-    return 3 if agent_missing else 0
+    return 3 if agent_missing or agent_error else 0
 
 
 if __name__ == "__main__":

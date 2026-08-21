@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import unittest
+from types import SimpleNamespace
 from unittest.mock import call, patch
 
 from voicekey import agent
@@ -93,6 +94,113 @@ class AgentDispatchTests(unittest.TestCase):
         )
         self.assertEqual(agent._safe_prompt("run {!whoami}"), "run { !whoami} ")
         self.assertEqual(agent._safe_prompt("hello\nworld"), "hello world ")
+
+    @patch("voicekey.agent._run", return_value=completed())
+    @patch("voicekey.agent._require", side_effect=lambda name: f"/usr/bin/{name}")
+    def test_remote_tmux_uses_strict_openssh_over_tailscale_and_stdin(
+        self, require, run
+    ):
+        cfg = AgentConfig(
+            transport="ssh-over-tailscale",
+            remote_host="desktop",
+            remote_user="alice",
+            identity_file="/home/alice/.ssh/id_ed25519",
+        )
+        agent._tmux(
+            cfg,
+            "load-buffer",
+            "-b",
+            "voicekey-prompt",
+            "-",
+            input_text="private prompt",
+        )
+
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[0], "/usr/bin/ssh")
+        self.assertIn("StrictHostKeyChecking=yes", argv)
+        self.assertIn("BatchMode=yes", argv)
+        self.assertIn("IdentitiesOnly=yes", argv)
+        self.assertIn("/home/alice/.ssh/id_ed25519", argv)
+        self.assertIn("ProxyCommand=/usr/bin/tailscale nc %h %p", argv)
+        self.assertIn("alice@desktop", argv)
+        self.assertEqual(
+            argv[-1],
+            "tmux -L voicekey-hermes load-buffer -b voicekey-prompt -",
+        )
+        self.assertEqual(run.call_args.kwargs["input_text"], "private prompt")
+        self.assertNotIn("private prompt", " ".join(argv))
+
+    @patch("voicekey.agent._remote_run", return_value=completed())
+    def test_remote_target_check_verifies_remote_dependencies(self, remote_run):
+        cfg = AgentConfig(
+            transport="ssh-over-tailscale",
+            remote_host="desktop",
+            remote_user="alice",
+            identity_file="/home/alice/.ssh/id_ed25519",
+        )
+        self.assertIsNone(agent.check_target(cfg))
+        command = remote_run.call_args.args[1]
+        self.assertIn("tmux systemd-run hermes", command[-1])
+
+    @patch(
+        "voicekey.agent._remote_run",
+        side_effect=agent.AgentError("command timed out after 10s: ssh"),
+    )
+    def test_remote_target_check_reports_connection_failure(self, remote_run):
+        cfg = AgentConfig(
+            transport="ssh-over-tailscale",
+            remote_host="desktop",
+            remote_user="alice",
+            identity_file="/home/alice/.ssh/id_ed25519",
+        )
+        self.assertEqual(
+            agent.check_target(cfg), "command timed out after 10s: ssh"
+        )
+
+    @patch("voicekey.agent.Path.stat", return_value=SimpleNamespace(st_size=10))
+    @patch("voicekey.agent.Path.is_file", return_value=True)
+    @patch("voicekey.agent._client_count", side_effect=[1, 2])
+    @patch("voicekey.agent._terminal_window_open", side_effect=[False, True])
+    @patch("voicekey.agent._run", return_value=completed())
+    @patch("voicekey.agent._require", side_effect=lambda name: f"/usr/bin/{name}")
+    def test_remote_terminal_uses_verified_ssh_and_allocates_tty(
+        self, require, run, window_open, client_count, is_file, stat
+    ):
+        cfg = AgentConfig(
+            transport="ssh-over-tailscale",
+            remote_host="desktop",
+            remote_user="alice",
+            identity_file="/home/alice/.ssh/id_ed25519",
+        )
+        self.assertTrue(agent._ensure_terminal(cfg))
+
+        argv = run.call_args.args[0]
+        ssh_index = argv.index("/usr/bin/ssh")
+        ssh_argv = argv[ssh_index:]
+        self.assertIn("-tt", ssh_argv)
+        self.assertIn("StrictHostKeyChecking=yes", ssh_argv)
+        self.assertIn(
+            "ProxyCommand=/usr/bin/tailscale nc %h %p", ssh_argv
+        )
+        self.assertIn("alice@desktop", ssh_argv)
+        self.assertEqual(
+            ssh_argv[-1],
+            "tmux -L voicekey-hermes attach-session -t voicekey-hermes",
+        )
+        self.assertIn("--title=Voicekey Hermes", argv)
+        self.assertFalse(any(arg.startswith("--class=") for arg in argv))
+
+    @patch("voicekey.agent._require", return_value="/usr/bin/niri")
+    @patch(
+        "voicekey.agent._run",
+        return_value=completed(
+            stdout='[{"app_id":"com.mitchellh.ghostty",'
+            '"title":"Voicekey Hermes"}]'
+        ),
+    )
+    def test_remote_terminal_window_is_identified_by_title(self, run, require):
+        cfg = AgentConfig(terminal_title="Voicekey Hermes")
+        self.assertTrue(agent._terminal_window_open(cfg))
 
     @patch("voicekey.agent._require", return_value="/opt/hermes")
     @patch("voicekey.agent._workspace", return_value="/work")

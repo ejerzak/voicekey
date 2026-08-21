@@ -7,6 +7,7 @@ stopping Hermes.  Prompt text enters tmux through stdin, never argv or logs.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -66,15 +67,135 @@ def _run(
     return result
 
 
+def _remote(cfg: AgentConfig) -> bool:
+    return cfg.transport == "ssh-over-tailscale"
+
+
+def _remote_destination(cfg: AgentConfig) -> str:
+    return f"{cfg.remote_user}@{cfg.remote_host}"
+
+
+def _ssh_argv(cfg: AgentConfig, *, allocate_tty: bool = False) -> list[str]:
+    """Build strict OpenSSH-over-Tailscale arguments, bypassing system config."""
+    ssh = _require("ssh")
+    tailscale = _require("tailscale")
+    known_hosts = Path(os.path.expanduser("~/.ssh/known_hosts"))
+    argv = [
+        ssh,
+        "-F",
+        "/dev/null",
+        "-o",
+        f"UserKnownHostsFile={known_hosts}",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        "UpdateHostKeys=no",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectionAttempts=1",
+        "-o",
+        "IdentitiesOnly=yes",
+        "-i",
+        os.path.expanduser(cfg.identity_file),
+        "-o",
+        f"ProxyCommand={tailscale} nc %h %p",
+    ]
+    if allocate_tty:
+        argv.append("-tt")
+    argv.append(_remote_destination(cfg))
+    return argv
+
+
+def _remote_run(
+    cfg: AgentConfig,
+    argv: list[str],
+    *,
+    input_text: str | None = None,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    """Run a noninteractive OpenSSH command over the Tailscale network."""
+    return _run(
+        [*_ssh_argv(cfg), shlex.join(argv)],
+        timeout=cfg.command_timeout,
+        input_text=input_text,
+        check=check,
+    )
+
+
+def _target_executable(cfg: AgentConfig, command: str) -> str:
+    return command if _remote(cfg) else _require(command)
+
+
+def _target_run(
+    cfg: AgentConfig,
+    argv: list[str],
+    *,
+    input_text: str | None = None,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    if _remote(cfg):
+        return _remote_run(cfg, argv, input_text=input_text, check=check)
+    return _run(
+        argv,
+        timeout=cfg.command_timeout,
+        input_text=input_text,
+        check=check,
+    )
+
+
+def _remote_executable(cfg: AgentConfig, command: str) -> str:
+    """Resolve a remote user-installed command through its login environment."""
+    result = _remote_run(
+        cfg,
+        ["sh", "-lc", 'command -v "$1"', "voicekey", command],
+        check=False,
+    )
+    path = result.stdout.strip().splitlines()
+    if result.returncode != 0 or not path or not path[-1].startswith("/"):
+        detail = (result.stderr or result.stdout).strip()[-500:]
+        raise AgentError(
+            f"{command} not found on {_remote_destination(cfg)}"
+            + (f": {detail}" if detail else "")
+        )
+    return path[-1]
+
+
+def check_target(cfg: AgentConfig) -> str | None:
+    """Return a diagnostic when the configured remote Hermes host is unusable."""
+    if not _remote(cfg):
+        return None
+    try:
+        result = _remote_run(
+            cfg,
+            [
+                "sh",
+                "-lc",
+                "for cmd in tmux systemd-run hermes; do "
+                'command -v "$cmd" >/dev/null || { '
+                'printf "missing remote command: %s\\n" "$cmd" >&2; '
+                "exit 127; }; done",
+            ],
+            check=False,
+        )
+    except AgentError as exc:
+        return str(exc)
+    if result.returncode == 0:
+        return None
+    return (result.stderr or result.stdout).strip()[-500:] or (
+        f"could not reach {_remote_destination(cfg)}"
+    )
+
+
 def _tmux(
     cfg: AgentConfig,
     *args: str,
     input_text: str | None = None,
     check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
-    return _run(
-        [_require("tmux"), "-L", cfg.tmux_socket, *args],
-        timeout=cfg.command_timeout,
+    return _target_run(
+        cfg,
+        [_target_executable(cfg, "tmux"), "-L", cfg.tmux_socket, *args],
         input_text=input_text,
         check=check,
     )
@@ -87,10 +208,11 @@ def _server_running(cfg: AgentConfig) -> bool:
 
 def _start_server(cfg: AgentConfig) -> None:
     """Start a foreground tmux server in a systemd-owned transient unit."""
-    systemd_run = _require("systemd-run")
-    tmux = _require("tmux")
+    systemd_run = _target_executable(cfg, "systemd-run")
+    tmux = _target_executable(cfg, "tmux")
     unit = f"voicekey-{cfg.tmux_socket}-tmux"
-    result = _run(
+    result = _target_run(
+        cfg,
         [
             systemd_run,
             "--user",
@@ -108,7 +230,6 @@ def _start_server(cfg: AgentConfig) -> None:
             "/dev/null",
             "-D",
         ],
-        timeout=cfg.command_timeout,
         check=False,
     )
     if result.returncode != 0 and "already exists" not in result.stderr.lower():
@@ -130,6 +251,22 @@ def _ensure_server(cfg: AgentConfig) -> None:
 
 def _workspace(cfg: AgentConfig) -> str:
     path = Path(cfg.working_directory)
+    if _remote(cfg):
+        created = _target_run(
+            cfg, ["mkdir", "-p", "--", str(path)], check=False
+        )
+        if created.returncode != 0:
+            detail = (created.stderr or created.stdout).strip()[-500:]
+            raise AgentError(
+                f"cannot create remote Hermes working directory {path}: "
+                f"{detail or 'no output'}"
+            )
+        exists = _target_run(cfg, ["test", "-d", str(path)], check=False)
+        if exists.returncode != 0:
+            raise AgentError(
+                f"remote Hermes working directory is not a directory: {path}"
+            )
+        return str(path)
     try:
         path.mkdir(mode=0o700, parents=True, exist_ok=True)
     except OSError as exc:
@@ -158,7 +295,11 @@ def _ensure_session(cfg: AgentConfig) -> bool:
     exists = _tmux(cfg, "has-session", "-t", target, check=False)
     created = exists.returncode != 0
     if created:
-        hermes = _require("hermes")
+        hermes = (
+            _remote_executable(cfg, "hermes")
+            if _remote(cfg)
+            else _require("hermes")
+        )
         command = shlex.join([hermes, "--tui"])
         _tmux(
             cfg,
@@ -181,9 +322,12 @@ def _ensure_session(cfg: AgentConfig) -> bool:
 
 
 def _ensure_terminal(cfg: AgentConfig) -> bool:
-    """Open Ghostty only when the Hermes tmux session has no client."""
+    """Open one local Ghostty attached to the configured Hermes session."""
     target = _session_target(cfg)
-    if _session_has_client(cfg):
+    if _remote(cfg):
+        if _terminal_window_open(cfg):
+            return False
+    elif _session_has_client(cfg):
         return False
 
     if not cfg.open_terminal:
@@ -193,13 +337,40 @@ def _ensure_terminal(cfg: AgentConfig) -> bool:
 
     systemd_run = _require("systemd-run")
     terminal = _require(cfg.terminal)
-    tmux = _require("tmux")
-    terminal_class = f"voicekey-{cfg.tmux_session}"
     environment = [
         f"--setenv={name}={os.environ[name]}"
         for name in ("WAYLAND_DISPLAY", "DISPLAY", "XDG_RUNTIME_DIR")
         if os.environ.get(name)
     ]
+    baseline_clients = _client_count(cfg) if _remote(cfg) else 0
+    if _remote(cfg):
+        known_hosts = Path(os.path.expanduser("~/.ssh/known_hosts"))
+        try:
+            known_hosts_ready = (
+                known_hosts.is_file() and known_hosts.stat().st_size > 0
+            )
+        except OSError:
+            known_hosts_ready = False
+        if not known_hosts_ready:
+            raise AgentError(
+                "OpenSSH known_hosts is empty; verify and record the host key "
+                f"for {cfg.remote_host} before using remote Voicekey"
+            )
+        attach_command = [
+            *_ssh_argv(cfg, allocate_tty=True),
+            shlex.join(
+                ["tmux", "-L", cfg.tmux_socket, "attach-session", "-t", target]
+            ),
+        ]
+    else:
+        attach_command = [
+            _require("tmux"),
+            "-L",
+            cfg.tmux_socket,
+            "attach-session",
+            "-t",
+            target,
+        ]
     _run(
         [
             systemd_run,
@@ -211,29 +382,49 @@ def _ensure_terminal(cfg: AgentConfig) -> bool:
             "--",
             terminal,
             f"--title={cfg.terminal_title}",
-            f"--class={terminal_class}",
             "--gtk-single-instance=false",
             "-e",
-            tmux,
-            "-L",
-            cfg.tmux_socket,
-            "attach-session",
-            "-t",
-            target,
+            *attach_command,
         ],
         timeout=cfg.command_timeout,
     )
 
     deadline = time.monotonic() + cfg.command_timeout
     while time.monotonic() < deadline:
-        if _session_has_client(cfg):
+        client_attached = _client_count(cfg) > baseline_clients
+        window_open = not _remote(cfg) or _terminal_window_open(cfg)
+        if client_attached and window_open:
             log.info("opened terminal for Hermes session %s", cfg.tmux_session)
             return True
         time.sleep(_POLL_SECONDS)
     raise AgentError("Ghostty opened but did not attach to the Hermes tmux session")
 
 
-def _session_has_client(cfg: AgentConfig) -> bool:
+def _terminal_window_open(cfg: AgentConfig) -> bool:
+    """Check the local compositor, not remote tmux's possibly-desktop clients."""
+    result = _run(
+        [_require("niri"), "msg", "--json", "windows"],
+        timeout=cfg.command_timeout,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()[-500:]
+        raise AgentError(f"could not query niri windows: {detail or 'no output'}")
+    try:
+        windows = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise AgentError(f"niri returned invalid window data: {exc}")
+    if not isinstance(windows, list):
+        raise AgentError("niri returned invalid window data: expected a list")
+    return any(
+        isinstance(window, dict)
+        and window.get("app_id") == "com.mitchellh.ghostty"
+        and window.get("title") == cfg.terminal_title
+        for window in windows
+    )
+
+
+def _client_count(cfg: AgentConfig) -> int:
     clients = _tmux(
         cfg,
         "list-clients",
@@ -243,7 +434,13 @@ def _session_has_client(cfg: AgentConfig) -> bool:
         "#{client_pid}",
         check=False,
     )
-    return clients.returncode == 0 and bool(clients.stdout.strip())
+    if clients.returncode != 0:
+        return 0
+    return len([line for line in clients.stdout.splitlines() if line.strip()])
+
+
+def _session_has_client(cfg: AgentConfig) -> bool:
+    return _client_count(cfg) > 0
 
 
 def _empty_composer(screen: str) -> bool:
