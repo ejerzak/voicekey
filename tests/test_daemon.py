@@ -76,11 +76,12 @@ class DaemonRoutingTests(unittest.TestCase):
         cfg = Config(dictate_toggle_key="KEY_CONFIG")
         daemon = Daemon(cfg)
         daemon.recorder = FakeRecorder()
-        code = next(
-            code
-            for code, action in daemon.actions.items()
+        chord = next(
+            chord
+            for chord, action in daemon.actions.items()
             if action == ("dictate", "toggle")
         )
+        code = next(iter(chord))
 
         daemon._on_key("/dev/input/event9", code, 1)
         daemon._on_key("/dev/input/event9", code, 0)
@@ -98,11 +99,12 @@ class DaemonRoutingTests(unittest.TestCase):
     def test_hold_key_starts_on_press_and_stops_on_release(self, _focus, _notify):
         daemon = Daemon(Config())
         daemon.recorder = FakeRecorder()
-        code = next(
-            code
-            for code, action in daemon.actions.items()
+        chord = next(
+            chord
+            for chord, action in daemon.actions.items()
             if action == ("dictate", "hold")
         )
+        code = next(iter(chord))
 
         daemon._on_key("/dev/input/event3", code, 1)
         self.assertTrue(daemon.recorder.active)
@@ -111,6 +113,40 @@ class DaemonRoutingTests(unittest.TestCase):
         daemon._on_key("/dev/input/event3", code, 0)
         self.assertFalse(daemon.recorder.active)
         self.assertEqual(daemon.recorder.stops, 1)
+        self.assertEqual(daemon.recordings.get_nowait().action, "dictate")
+
+    @patch("voicekey.daemon.notify")
+    @patch("voicekey.daemon.focus.window_id", return_value=7)
+    def test_longest_matching_chord_selects_agent(self, _focus, _notify):
+        cfg = Config(
+            dictate_key="KEY_F23",
+            agent_key="KEY_RIGHTALT+KEY_F23",
+        )
+        daemon = Daemon(cfg)
+        daemon.recorder = FakeRecorder()
+
+        daemon._on_key("/dev/input/event3", 100, 1)  # KEY_RIGHTALT
+        daemon._on_key("/dev/input/event3", 193, 1)  # KEY_F23
+        self.assertTrue(daemon.recorder.active)
+        self.assertEqual(daemon.session_action, "agent")
+
+        daemon._on_key("/dev/input/event3", 193, 0)
+        self.assertFalse(daemon.recorder.active)
+        self.assertEqual(daemon.recordings.get_nowait().action, "agent")
+
+    @patch("voicekey.daemon.notify")
+    @patch("voicekey.daemon.focus.window_id", return_value=7)
+    def test_bare_shared_key_selects_dictation(self, _focus, _notify):
+        cfg = Config(
+            dictate_key="KEY_F23",
+            agent_key="KEY_RIGHTALT+KEY_F23",
+        )
+        daemon = Daemon(cfg)
+        daemon.recorder = FakeRecorder()
+
+        daemon._on_key("/dev/input/event3", 193, 1)  # KEY_F23
+        self.assertEqual(daemon.session_action, "dictate")
+        daemon._on_key("/dev/input/event3", 193, 0)
         self.assertEqual(daemon.recordings.get_nowait().action, "dictate")
 
 

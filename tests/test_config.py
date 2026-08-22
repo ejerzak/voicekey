@@ -31,7 +31,10 @@ class ConfigTests(unittest.TestCase):
             os.path.dirname(__file__), "..", "hosts", "desktop.toml"
         )
         cfg = load(path)
-        self.assertEqual(cfg.backend.type, "faster-whisper")
+        self.assertEqual(cfg.backend.type, "parakeet")
+        self.assertTrue(cfg.backend.model_dir.endswith(
+            "/sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-non-streaming"
+        ))
         self.assertEqual(cfg.dictate_key, "KEY_F9")
         self.assertEqual(cfg.agent_key, "KEY_F10")
         self.assertEqual(cfg.dictate_toggle_key, "")
@@ -43,6 +46,13 @@ class ConfigTests(unittest.TestCase):
             os.path.dirname(__file__), "..", "hosts", "laptop.toml"
         )
         cfg = load(path)
+        self.assertEqual(cfg.dictate_key, "KEY_F23")
+        self.assertEqual(cfg.agent_key, "KEY_RIGHTALT+KEY_F23")
+        self.assertEqual(cfg.dictate_toggle_key, "")
+        self.assertEqual(cfg.agent_toggle_key, "")
+        self.assertTrue(cfg.backend.model_dir.endswith(
+            "/sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-non-streaming"
+        ))
         self.assertEqual(cfg.agent.transport, "ssh-over-tailscale")
         self.assertEqual(cfg.agent.remote_host, "desktop")
         self.assertEqual(cfg.agent.remote_user, "alice")
@@ -83,8 +93,19 @@ class ConfigTests(unittest.TestCase):
             self._load_text("min_seconds = 2\nmax_seconds = 1\n")
 
     def test_voice_keys_must_be_unique(self):
-        with self.assertRaisesRegex(ConfigError, "configured voice keys must differ"):
+        with self.assertRaisesRegex(
+            ConfigError, "configured voice key chords must differ"
+        ):
             self._load_text('dictate_toggle_key = "KEY_F9"\n')
+
+    def test_voice_chord_order_does_not_make_duplicate_binding_unique(self):
+        with self.assertRaisesRegex(
+            ConfigError, "configured voice key chords must differ"
+        ):
+            self._load_text(
+                'dictate_key = "KEY_F23+KEY_RIGHTALT"\n'
+                'agent_key = "KEY_RIGHTALT+KEY_F23"\n'
+            )
 
 
 if __name__ == "__main__":

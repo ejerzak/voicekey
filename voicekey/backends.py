@@ -17,6 +17,10 @@ from .config import BackendConfig
 log = logging.getLogger("voicekey.backends")
 
 PARAKEET_MODELS = {
+    "sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-non-streaming": (
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
+        "sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-non-streaming.tar.bz2"
+    ),
     "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8": (
         "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
         "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2"
@@ -97,9 +101,7 @@ class FasterWhisperBackend:
         return " ".join(s.text.strip() for s in segments).strip()
 
 
-# --- parakeet (laptop, CPU via sherpa-onnx) ----------------------------------
-# UNTESTED until the laptop arrives — the config seam and graceful-failure
-# paths are what land now.
+# --- parakeet (CPU via sherpa-onnx) -----------------------------------------
 
 class ParakeetBackend:
     def __init__(self, cfg: BackendConfig, language: str) -> None:
@@ -114,7 +116,7 @@ class ParakeetBackend:
         if not model_dir or not os.path.isdir(model_dir):
             raise BackendUnavailable(
                 f"parakeet model_dir not found: {model_dir or '(unset)'} — download a "
-                "sherpa-onnx Parakeet model (e.g. sherpa-onnx-nemo-parakeet-tdt-0.6b-v3) "
+                "sherpa-onnx Parakeet model "
                 "and set [backend] model_dir in config.toml"
             )
 

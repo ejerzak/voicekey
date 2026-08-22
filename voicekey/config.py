@@ -24,6 +24,16 @@ class ConfigError(Exception):
     pass
 
 
+def key_chord_names(value: str) -> tuple[str, ...]:
+    """Return the evdev key names in a ``+``-separated key chord."""
+    names = tuple(name.strip() for name in value.split("+"))
+    if not names or any(not name for name in names):
+        raise ConfigError(f"invalid key chord {value!r}")
+    if len(names) != len(set(names)):
+        raise ConfigError(f"key chord contains a duplicate key: {value!r}")
+    return names
+
+
 @dataclass
 class BackendConfig:
     type: str = "faster-whisper"
@@ -126,7 +136,7 @@ def _validate(cfg: Config) -> None:
     if cfg.min_seconds >= cfg.max_seconds:
         raise ConfigError("min_seconds must be less than max_seconds")
     configured_keys = [
-        key
+        frozenset(key_chord_names(key))
         for key in (
             cfg.dictate_key,
             cfg.agent_key,
@@ -136,7 +146,7 @@ def _validate(cfg: Config) -> None:
         if key
     ]
     if len(configured_keys) != len(set(configured_keys)):
-        raise ConfigError("configured voice keys must differ")
+        raise ConfigError("configured voice key chords must differ")
 
     cfg.backend.type = _string("backend.type", cfg.backend.type)
     if cfg.backend.type not in BACKEND_TYPES:

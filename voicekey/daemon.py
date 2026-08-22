@@ -22,7 +22,7 @@ from . import focus
 from . import inject as inject_mod
 from . import recovery
 from .backends import BackendUnavailable, create_backend
-from .config import Config, ConfigError
+from .config import Config, ConfigError, key_chord_names
 from .listener import KeyboardListener
 from .notify import notify
 from .recorder import Recorder, RecordingError
@@ -51,6 +51,10 @@ def _keycode(name: str) -> int:
     return code
 
 
+def _key_chord(value: str) -> frozenset[int]:
+    return frozenset(_keycode(name) for name in key_chord_names(value))
+
+
 def fix_environment() -> None:
     """Fill session variables commonly absent from a systemd user service."""
     if not os.environ.get("WAYLAND_DISPLAY"):
@@ -67,17 +71,19 @@ def fix_environment() -> None:
 class Daemon:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
-        self.actions: dict[int, tuple[str, str]] = {
-            _keycode(cfg.dictate_key): ("dictate", HOLD),
-            _keycode(cfg.agent_key): ("agent", HOLD),
+        self.actions: dict[frozenset[int], tuple[str, str]] = {
+            _key_chord(cfg.dictate_key): ("dictate", HOLD),
+            _key_chord(cfg.agent_key): ("agent", HOLD),
         }
         if cfg.dictate_toggle_key:
-            self.actions[_keycode(cfg.dictate_toggle_key)] = ("dictate", TOGGLE)
+            self.actions[_key_chord(cfg.dictate_toggle_key)] = ("dictate", TOGGLE)
         if cfg.agent_toggle_key:
-            self.actions[_keycode(cfg.agent_toggle_key)] = ("agent", TOGGLE)
+            self.actions[_key_chord(cfg.agent_toggle_key)] = ("agent", TOGGLE)
         self.recorder = Recorder()
+        self.pressed: dict[str, set[int]] = {}
         self.session_action: str | None = None
-        self.session_code: int | None = None
+        self.session_chord: frozenset[int] | None = None
+        self.session_behavior: str | None = None
         self.session_device: str | None = None
         self.session_window_id: int | None = None
         self.backend = None
@@ -110,7 +116,7 @@ class Daemon:
             target=self._agent_worker, daemon=True, name="agent-dispatch"
         ).start()
         listener = KeyboardListener(
-            keycodes=set(self.actions),
+            keycodes=set().union(*self.actions),
             on_key=self._on_key,
             on_device_lost=self._on_device_lost,
             on_tick=self._on_tick,
@@ -132,35 +138,58 @@ class Daemon:
     # Listener callbacks run on the main thread.
 
     def _on_key(self, device_path: str, code: int, value: int) -> None:
-        action, behavior = self.actions[code]
+        pressed = self.pressed.setdefault(device_path, set())
+        if value == 0:
+            if (
+                self.recorder.active
+                and self.session_behavior == HOLD
+                and device_path == self.session_device
+                and self.session_chord is not None
+                and code in self.session_chord
+            ):
+                self._finish()
+            pressed.discard(code)
+            return
+
+        pressed.add(code)
+        matches = [
+            (chord, action)
+            for chord, action in self.actions.items()
+            if code in chord and chord <= pressed
+        ]
+        if not matches:
+            return
+        longest = max(len(chord) for chord, _action in matches)
+        matches = [item for item in matches if len(item[0]) == longest]
+        if len(matches) != 1:
+            log.warning("ignoring ambiguous key chords for pressed keys %s", pressed)
+            return
+        chord, (action, behavior) = matches[0]
         if behavior == TOGGLE:
-            if value == 0:
-                return
             if self.recorder.active:
-                if code == self.session_code and device_path == self.session_device:
+                if (
+                    chord == self.session_chord
+                    and device_path == self.session_device
+                ):
                     self._finish()
                 else:
                     log.debug("ignoring %s toggle: already recording", action)
                 return
-            self._start(device_path, code, action, "press again to stop")
+            self._start(device_path, chord, behavior, action, "press again to stop")
             return
 
-        if value == 1:
-            if self.recorder.active:
-                log.debug("ignoring %s press: already recording", action)
-                return
-            self._start(device_path, code, action, "release to stop")
-        else:
-            if (
-                not self.recorder.active
-                or code != self.session_code
-                or device_path != self.session_device
-            ):
-                return
-            self._finish()
+        if self.recorder.active:
+            log.debug("ignoring %s press: already recording", action)
+            return
+        self._start(device_path, chord, behavior, action, "release to stop")
 
     def _start(
-        self, device_path: str, code: int, action: str, stop_instruction: str
+        self,
+        device_path: str,
+        chord: frozenset[int],
+        behavior: str,
+        action: str,
+        stop_instruction: str,
     ) -> None:
         try:
             self.recorder.start()
@@ -168,7 +197,8 @@ class Daemon:
             notify("voicekey: recording failed", str(exc), error=True)
             return
         self.session_action = action
-        self.session_code = code
+        self.session_chord = chord
+        self.session_behavior = behavior
         self.session_device = device_path
         self.session_window_id = (
             focus.window_id()
@@ -185,7 +215,8 @@ class Daemon:
     def _clear_session(self) -> tuple[str | None, int | None]:
         action, window_id = self.session_action, self.session_window_id
         self.session_action = None
-        self.session_code = None
+        self.session_chord = None
+        self.session_behavior = None
         self.session_device = None
         self.session_window_id = None
         return action, window_id
@@ -218,6 +249,7 @@ class Daemon:
             )
 
     def _on_device_lost(self, device_path: str) -> None:
+        self.pressed.pop(device_path, None)
         if self.recorder.active and device_path == self.session_device:
             self._clear_session()
             self.recorder.abort()

@@ -1,22 +1,24 @@
 # voicekey — global hold-to-talk voice input
 
-Hold **F9**, speak, release → the transcript is typed into the focused field.
-If transcription takes too long or niri reports that focus moved to another
-window, voicekey copies the transcript instead of typing it somewhere wrong.
+Hold the configured dictation key, speak, release → the transcript is typed
+into the focused field. If transcription takes too long or niri reports that
+focus moved to another window, voicekey copies the transcript instead of typing
+it somewhere wrong.
 
-Hold **F10**, speak, release → the transcript is sent to a persistent Hermes
-TUI. This path is independent of Emacs and of the directory containing the
-focused application. On `desktop`, Hermes is local. On `laptop`,
-recording and transcription stay local, while the transcript and terminal
-connection go to `desktop` over OpenSSH routed through Tailscale.
+Hold the configured agent key, speak, release → the transcript is sent to a
+persistent Hermes TUI. This path is independent of Emacs and of the directory
+containing the focused application. On `desktop`, Hermes is local. On
+`laptop`, recording and transcription stay local, while the transcript and
+terminal connection go to `desktop` over OpenSSH routed through
+Tailscale.
 
-On the laptop, the bare settings key (physical F9) toggles dictation: press
-once, speak, and press it again to stop. The bare Bluetooth key (physical F10)
-does the same for agent input. The firmware reports these media keys as
-instantaneous pulses even when physically held, so Fn+F9/F10 remain available
-for genuine hold-to-talk.
+On the laptop, hold **Copilot** for dictation or hold **Right
+Alt+Copilot** for agent input. Linux reports Copilot as
+`Left Meta+Left Shift+F23`; Voicekey routes on F23 and the physically held Right
+Alt. The physical F9 key remains Print Screen. On `desktop`, the bindings
+remain F9 for dictation and F10 for agent input.
 
-On the first F10 dispatch, voicekey:
+On the first agent dispatch, voicekey:
 
 1. connects to the configured local or remote host;
 2. starts a dedicated tmux server in a supervised systemd user unit;
@@ -24,7 +26,7 @@ On the first F10 dispatch, voicekey:
 4. opens a local Ghostty window attached to that session; and
 5. waits for Hermes's composer to be idle and empty before submitting the prompt.
 
-Later F10 dispatches reuse the same Hermes process and conversation. If its
+Later agent dispatches reuse the same Hermes process and conversation. If its
 Ghostty window is open, voicekey does not open another. If the window was
 closed, voicekey opens a new one and reattaches it. Ghostty is only a tmux
 client, so closing the window does not stop Hermes. Restarting voicekey does
@@ -76,7 +78,7 @@ systemctl --user status voicekey-voicekey-hermes-tmux.service
 ssh -F /dev/null -o 'ProxyCommand=tailscale nc %h %p' alice@desktop
 ```
 
-The tmux and systemd commands become meaningful after the first F10 dispatch.
+The tmux and systemd commands become meaningful after the first agent dispatch.
 To open the persistent Hermes session yourself without starting another Hermes:
 
 ```sh
@@ -89,10 +91,10 @@ download on later runs once all required model files are present. The daemon
 and `--check` never download model data themselves.
 
 `--check` exits 0 when fully ready, 2 when software/backend checks pass but no
-keyboard is readable, 3 when F9 dictation is ready but the configured F10 agent
-target is unavailable, and 1 for a configuration, core dependency, or backend
-failure. Install step 07 treats statuses 2 and 3 as warnings so a missing agent
-target does not prevent working dictation from being installed.
+keyboard is readable, 3 when dictation is ready but the configured agent target
+is unavailable, and 1 for a configuration, core dependency, or backend failure.
+Install step 07 treats statuses 2 and 3 as warnings so a missing agent target
+does not prevent working dictation from being installed.
 
 ## Configuration
 
@@ -106,23 +108,23 @@ Backends are selected by `[backend].type`:
 
 | backend | machine | notes |
 |---|---|---|
-| `faster-whisper` | desktop | large-v3-turbo on CUDA; cuBLAS/cuDNN come from pip NVIDIA wheels |
-| `parakeet` | laptop | CPU via sherpa-onnx; still untested; set `model_dir` |
+| `faster-whisper` | optional | large-v3-turbo; CUDA support comes from pip NVIDIA wheels |
+| `parakeet` | desktop + laptop | Unified English 0.6B INT8 on CPU via sherpa-onnx |
 | `remote` | optional | configuration seam only; deliberately unimplemented |
 
 `[agent].transport` is `local` on the desktop and `ssh-over-tailscale` on the
 laptop. The remote transport runs Hermes and its persistent tmux server on
-`remote_user@remote_host`, but always opens Ghostty on the machine where F10
-was pressed. `[agent].working_directory` is deliberately neutral. Hermes
-retains its own session and memory, but a general voice command does not
+`remote_user@remote_host`, but always opens Ghostty on the machine where the
+agent key was pressed. `[agent].working_directory` is deliberately neutral.
+Hermes retains its own session and memory, but a general voice command does not
 accidentally inherit the focused editor's repository. `[agent].target` is the
 adapter seam for future agents; the implemented target is currently only
 `hermes`.
 
-`ready_timeout` controls how long an F10 transcript waits while Hermes is busy,
-showing a modal, or contains a manually typed draft. Later F10 transcripts stay
-behind it in the daemon's agent queue. On timeout, delivery fails closed and
-the transcript is written to the recovery file.
+`ready_timeout` controls how long an agent transcript waits while Hermes is
+busy, showing a modal, or contains a manually typed draft. Later agent
+transcripts stay behind it in the daemon's agent queue. On timeout, delivery
+fails closed and the transcript is written to the recovery file.
 
 ## Behavior and safety
 
@@ -155,7 +157,7 @@ the transcript is written to the recovery file.
 - Dictation and agent notifications use separate replacement IDs.
 
 Membership in `input` lets every process running as the user read raw keyboard
-events, not merely F9/F10. This is acceptable as an explicit first-version
-tradeoff on a personal machine, not a strong security boundary. A future
-version should isolate evdev access in a minimal helper that emits only the two
-configured key transitions.
+events, not merely the configured voice chords. This is acceptable as an
+explicit first-version tradeoff on a personal machine, not a strong security
+boundary. A future version should isolate evdev access in a minimal helper that
+emits only the two configured key transitions.

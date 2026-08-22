@@ -1,8 +1,8 @@
 # voicekey config — per-host. Real configs live in apps/voicekey/hosts/<hostname>.toml
 # and are symlinked to ~/.config/voicekey/config.toml by install step 07.
 
-dictate_key = "KEY_F9"     # evdev key names; niri consumes these in binds.kdl
-agent_key   = "KEY_F10"
+dictate_key = "KEY_F9"     # evdev key names or chords such as KEY_RIGHTALT+KEY_F23
+agent_key   = "KEY_F10"    # niri must consume the corresponding compositor chord
 dictate_toggle_key = ""    # optional pulse key: first press starts, second stops
 agent_toggle_key   = ""
 language    = "en"

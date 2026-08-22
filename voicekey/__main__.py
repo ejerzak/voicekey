@@ -52,6 +52,7 @@ def check(cfg) -> int:
     from evdev import InputDevice, ecodes
 
     from .backends import BackendUnavailable, create_backend
+    from .config import key_chord_names
     from .listener import _supports_any_key, all_event_devices
 
     key_names = (
@@ -60,10 +61,23 @@ def check(cfg) -> int:
         cfg.dictate_toggle_key,
         cfg.agent_toggle_key,
     )
-    keycodes = {
-        ecodes.ecodes[name] for name in key_names
-        if isinstance(ecodes.ecodes.get(name), int)
+    chord_key_names = {
+        name
+        for chord in key_names if chord
+        for name in key_chord_names(chord)
     }
+    unknown_keys = sorted(
+        name
+        for name in chord_key_names
+        if not isinstance(ecodes.ecodes.get(name), int)
+    )
+    if unknown_keys:
+        print(
+            f"config error: unknown key name(s): {', '.join(unknown_keys)}",
+            file=sys.stderr,
+        )
+        return 1
+    keycodes = {ecodes.ecodes[name] for name in chord_key_names}
 
     print(
         f"keys: dictate={cfg.dictate_key} agent={cfg.agent_key} "
