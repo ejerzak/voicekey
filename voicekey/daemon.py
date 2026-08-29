@@ -45,11 +45,6 @@ AGENT_QUEUE_SIZE = 8
 PREVIEW_INTERVAL = 0.25  # seconds between notification updates
 ACTIVATION_WAIT = 0.2  # seconds to wait for the focused field after binding
 OVERLOAD_FRAMES = 30  # 3 s of audio the live recognizer may fall behind
-NO_SPACE_AFTER = " \t\n([{\"'“‘"  # characters a dictation may follow directly
-NO_SPACE_BEFORE = ",.;:!?)]}"  # dictations starting like this join the text
-# Applications whose reported surrounding text is empty whatever precedes the
-# cursor (Emacs pgtk); an empty report from them means "unknown", not "start".
-UNTRUSTED_SURROUNDING = {"emacs"}
 
 
 def _keycode(name: str) -> int:
@@ -125,7 +120,61 @@ def spaced(prefix: str, text: str) -> str:
     """PREFIX is the space owed between the existing text and this
     dictation; it is dropped when the dictation itself starts with
     punctuation or whitespace."""
-    return text if not text or text[0] in NO_SPACE_BEFORE or text[0].isspace() else prefix + text
+    if not text or text[0] in Spacing.NO_SPACE_BEFORE or text[0].isspace():
+        return text
+    return prefix + text
+
+
+class Spacing:
+    """The space owed between what is in the field and a new dictation.
+
+    Decided by the character before the cursor when the application reports
+    it; otherwise a space is owed only when voicekey itself was the last to
+    type in that window — a keystroke in between hands spacing back to the
+    user. Predicted at key-down for the preview and settled at delivery,
+    once any dictation queued ahead in the same window has landed."""
+
+    NO_SPACE_AFTER = " \t\n([{\"'“‘"  # a dictation may follow these directly
+    NO_SPACE_BEFORE = ",.;:!?)]}"  # a dictation starting like this joins the text
+    UNTRUSTED = {"emacs"}  # reports "" whatever precedes the cursor
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._continuing: int | str | None = None  # window voicekey typed into last
+        self._activity = 0  # keystrokes seen; guards inserted() against a race
+        self.landing: int | str | None = None  # window of a dictation not yet delivered
+
+    def predict(self, window_id, app_id: str | None, before: str | None) -> str:
+        """At key-down, for the preview."""
+        if window_id is not None and window_id == self.landing:
+            return " "  # our own text is about to land there
+        return self.owed(before, app_id, window_id)
+
+    def settle(self, job: Job) -> str:
+        """At delivery: whatever was landing has landed by now."""
+        before = None if job.after_landing else job.before
+        return self.owed(before, job.app_id, job.window_id)
+
+    def owed(self, before: str | None, app_id: str | None, window_id) -> str:
+        if before is not None and not (before == "" and app_id in self.UNTRUSTED):
+            return "" if before == "" or before in self.NO_SPACE_AFTER else " "
+        with self._lock:
+            return " " if window_id is not None and window_id == self._continuing else ""
+
+    def mark(self) -> int:
+        """Take before inserting; hand to inserted() afterwards."""
+        return self._activity
+
+    def inserted(self, window_id, text: str, mark: int) -> None:
+        with self._lock:
+            if self._activity != mark:
+                return  # the user typed meanwhile and owns the spacing now
+            self._continuing = None if text[-1:].isspace() else window_id
+
+    def user_typed(self) -> None:
+        with self._lock:
+            self._activity += 1
+            self._continuing = None
 
 
 # --- one held key -----------------------------------------------------------
@@ -144,9 +193,9 @@ class Session:
         self.window_id: int | None = None
         self.app_id: str | None = None
         self.preview: NotifyPreview | ImePreview = NotifyPreview(action)
-        # Spacing inputs, captured at key-down; see Daemon._prefix.
+        # Spacing inputs, captured at key-down; see Spacing.
         self.before: str | None = None  # character before the cursor, if reported
-        self.after_pending = False  # a previous dictation was still landing
+        self.after_landing = False  # our own text was still landing in this window
         self.prefix = ""  # space shown in the preview; settled again at delivery
         self.text = ""
         self.decoder: threading.Thread | None = None
@@ -244,7 +293,7 @@ class Job:
     live_text: str
     app_id: str | None = None
     before: str | None = None
-    after_pending: bool = False
+    after_landing: bool = False
 
 
 class Daemon:
@@ -267,10 +316,7 @@ class Daemon:
         self.ime: InputMethod | None = None
         self.jobs: queue.Queue[Job] = queue.Queue(maxsize=TRANSCRIPTION_QUEUE_SIZE)
         self.agent_prompts: queue.Queue[str] = queue.Queue(maxsize=AGENT_QUEUE_SIZE)
-        # Window that received the last inserted dictation, when that text did
-        # not end in whitespace: the next dictation there is owed a space.
-        self._continuing: int | None = None
-        self._last_window: int | None = None  # window of the previous dictation
+        self.spacing = Spacing()
         # A decode thread that never came back; the recognizer is not
         # provably safe to share with it, so no live preview until it exits.
         self._stuck: threading.Thread | None = None
@@ -408,17 +454,18 @@ class Daemon:
         """Bind the field first, milliseconds after key-down, then the rest;
         text will go only to the field active now."""
         dictate = session.action == "dictate"
-        session.after_pending = self.jobs.unfinished_tasks > 0
         generation = self._bind_field() if dictate and self.ime is not None else None
         if dictate:
             focused = focus.focused()
             session.window_id, session.app_id = focused.id, focused.app_id
+            session.after_landing = (session.window_id is not None
+                                     and session.window_id == self.spacing.landing)
         # In-field text needs a real focused window: a lock screen or launcher
         # can activate the input method too, and text must never land there.
         if generation is not None and (
                 session.window_id is not None or not self.cfg.dictation.require_same_window):
             session.preview = ImePreview(self.ime, generation)
-            if not session.after_pending:  # else stale: the landing text changes it
+            if not session.after_landing:  # else stale: the landing text changes it
                 session.before = self.ime.before_cursor()
         if self.streaming is not None:
             if self._stuck is not None and self._stuck.is_alive():
@@ -426,12 +473,9 @@ class Daemon:
             else:
                 session.attach(self.streaming.session())
         if dictate:
-            continuing = session.after_pending and session.window_id == self._last_window
-            session.prefix = " " if continuing else self._prefix(
-                session.before, session.app_id, session.window_id)
+            session.prefix = self.spacing.predict(session.window_id, session.app_id, session.before)
             if isinstance(session.preview, ImePreview):
                 session.preview.prefix = session.prefix
-            self._last_window = session.window_id
 
     def _bind_field(self) -> int | None:
         """Generation of the field active right now, or None.
@@ -446,14 +490,6 @@ class Daemon:
         while (generation := self.ime.activation()) is None and time.monotonic() < deadline:
             time.sleep(0.005)
         return generation
-
-    def _prefix(self, before: str | None, app_id: str | None, window_id: int | None) -> str:
-        """The space owed before a dictation: decided by the character before
-        the cursor when the application reports it, otherwise by whether we
-        are continuing our own previous dictation in the same window."""
-        if before is not None and not (before == "" and app_id in UNTRUSTED_SURROUNDING):
-            return "" if before == "" or before in NO_SPACE_AFTER else " "
-        return " " if window_id is not None and window_id == self._continuing else ""
 
     def _finish(self) -> None:
         session, self.session = self.session, None
@@ -474,9 +510,11 @@ class Daemon:
         self._note_stuck(session)
         job = Job(samples, session.action, time.monotonic(), session.window_id,
                   session.preview, session.text, session.app_id, session.before,
-                  session.after_pending)
+                  session.after_landing)
         try:
             self.jobs.put_nowait(job)
+            if job.action == "dictate":
+                self.spacing.landing = job.window_id
         except queue.Full:
             session.preview.clear()
             notify("voicekey: busy",
@@ -495,9 +533,7 @@ class Daemon:
             self._stuck = session.decoder
 
     def _on_activity(self) -> None:
-        """The user typed or clicked since the last dictation landed: the
-        automatic space assumes voicekey was the last to touch the text."""
-        self._continuing = None
+        self.spacing.user_typed()
 
     def _on_device_lost(self, device: str) -> None:
         self.pressed.pop(device, None)
@@ -520,6 +556,8 @@ class Daemon:
                 job.preview.clear()
                 notify("voicekey: error", f"{type(exc).__name__}: {exc}", error=True)
             finally:
+                if job.action == "dictate" and self.spacing.landing == job.window_id:
+                    self.spacing.landing = None
                 self.jobs.task_done()
 
     def _process(self, job: Job) -> None:
@@ -557,14 +595,13 @@ class Daemon:
             job.preview.clear()
             self._copy_instead(text, f"dictation was {age:.1f}s old; copied instead of typing")
             return
-        # Settle the spacing now: an earlier dictation may have landed since
-        # key-down, in which case only the continuation rule is current.
-        prefix = self._prefix(None if job.after_pending else job.before, job.app_id, job.window_id)
+        prefix = self.spacing.settle(job)
+        mark = self.spacing.mark()
         if isinstance(job.preview, ImePreview):
             job.preview.prefix = prefix
             if self._same_window(job) and job.preview.commit(text):
                 log.info("committed in place")
-                self._inserted(job, text)
+                self._inserted(job, text, mark)
                 return
             job.preview.clear()
             self._copy_instead(text, "the field changed; copied instead of typing")
@@ -579,12 +616,12 @@ class Daemon:
                 self._copy_instead(text, f"typing failed ({exc}); copied instead")
                 return
             log.info("typed via wtype")
-            self._inserted(job, text)
+            self._inserted(job, text, mark)
             return
         self._copy_instead(text, "", summary="📋 Copied")
 
-    def _inserted(self, job: Job, text: str) -> None:
-        self._continuing = None if text[-1].isspace() else job.window_id
+    def _inserted(self, job: Job, text: str, mark: int) -> None:
+        self.spacing.inserted(job.window_id, text, mark)
         notify("✓ Typed", channel="dictate")
 
     def _same_window(self, job: Job) -> bool:

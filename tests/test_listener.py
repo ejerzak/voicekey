@@ -5,7 +5,7 @@ from unittest.mock import Mock
 
 from evdev import ecodes
 
-from voicekey.listener import KeyboardListener, _supports_any_key
+from voicekey.listener import KeyboardListener, _is_keyboard, _supports_any_key
 
 
 def _event(code, value, type_=ecodes.EV_KEY):
@@ -51,6 +51,14 @@ class InputDeviceSelectionTests(unittest.TestCase):
                 {ecodes.KEY_CONFIG, ecodes.KEY_BLUETOOTH},
             )
         )
+
+    def test_any_keyboard_counts_for_activity_but_a_mouse_does_not(self):
+        keyboard = Mock()
+        keyboard.capabilities.return_value = {ecodes.EV_KEY: [ecodes.KEY_A, ecodes.KEY_ENTER]}
+        mouse = Mock()
+        mouse.capabilities.return_value = {ecodes.EV_KEY: [ecodes.BTN_LEFT, ecodes.BTN_RIGHT]}
+        self.assertTrue(_is_keyboard(keyboard))
+        self.assertFalse(_is_keyboard(mouse))
 
     def test_unrelated_button_device_is_ignored(self):
         device = Mock()

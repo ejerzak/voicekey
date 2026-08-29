@@ -24,6 +24,8 @@ transcript. Everything runs locally on the CPU; nothing leaves the machine.
 
 - Linux with systemd and PipeWire, on a Wayland compositor that implements
   `zwp_input_method_v2`: niri, sway, Hyprland, river, labwc, Wayfire.
+  The focused-window guard talks to niri, sway and Hyprland; on the others
+  set `require_same_window = false` (the field-level guard still applies).
   GNOME and KDE implement neither this nor the virtual-keyboard protocol;
   there voicekey could only copy to the clipboard, so it is not supported.
 - `uv` (installs Python 3.12 into a private venv), `gcc` (the evdev
@@ -94,7 +96,8 @@ gets a leading space, one that starts a line or follows an opening bracket
 does not. The character before the cursor decides when the application
 reports it (GTK fields, Firefox); terminals and Emacs report nothing, so
 there voicekey adds a space only when it was itself the last thing to type
-in that window — any key or click in between leaves spacing to you.
+in that window — a keystroke on any keyboard in between leaves spacing to
+you (mouse clicks are not observed).
 
 ## Configuration
 
@@ -149,8 +152,9 @@ failure. Undelivered transcripts are saved, mode 0600, at
 - The agent path infers Hermes's state from its visible TUI, so a Hermes
   update can break the "never submit into a dialog" guarantee until the
   patterns are refreshed.
-- Tested on Fedora with niri. Other listed compositors follow the same
-  protocols but have not been exercised.
+- Tested on Fedora with niri. The sway and Hyprland focus queries and the
+  other listed compositors follow the same protocols but have not been
+  exercised.
 
 ## License
 

@@ -9,7 +9,7 @@ import numpy as np
 
 from voicekey import daemon as daemon_mod
 from voicekey.config import Config
-from voicekey.daemon import Daemon, ImePreview, Job, NotifyPreview, Session
+from voicekey.daemon import Daemon, ImePreview, Job, NotifyPreview, Session, Spacing
 from voicekey.focus import Focus
 
 
@@ -438,101 +438,128 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(daemon.ime.preedits, [("", 1)])
 
 
-class SpacingTests(unittest.TestCase):
-    def _daemon(self, before=None, continuing=None, window=7, app="ghostty",
-                pending=False, last_window=None):
-        daemon = Daemon(Config())
-        daemon.recorder = FakeRecorder()
-        daemon.ime = FakeIme(generation=1)
-        daemon.ime.before_cursor = lambda: before
-        daemon._continuing = continuing
-        daemon._last_window = last_window
-        if pending:
-            daemon.jobs.put_nowait(_job("dictate", window_id=7))
-        with patch("voicekey.daemon.notify"), _focused(window, app):
-            daemon._start("/dev/input/event3", frozenset(), "hold", "dictate", "release")
-        return daemon
-
-    def test_continuing_text_gets_a_leading_space_in_preview_and_commit(self):
-        daemon = self._daemon(before=".")
-        daemon.session.preview.update("Second thought")
-        self.assertEqual(daemon.ime.preedits, [(" Second thought", 1)])
-        daemon.session.preview.commit("Second thought.")
-        self.assertEqual(daemon.ime.commits, [(" Second thought.", 1)])
-
-    def test_line_start_or_opening_bracket_gets_no_space(self):
+class SpacingRuleTests(unittest.TestCase):
+    def test_character_before_the_cursor_decides_when_reported(self):
+        spacing = Spacing()
+        self.assertEqual(spacing.owed(".", "firefox", 7), " ")
         for before in ("\n", " ", "(", "“", ""):
-            self.assertEqual(self._daemon(before=before, continuing=7).session.prefix, "", repr(before))
+            self.assertEqual(spacing.owed(before, "firefox", 7), "", repr(before))
 
     def test_emacs_reports_nothing_useful_so_continuation_decides(self):
-        self.assertEqual(self._daemon(before="", app="emacs", continuing=7).session.prefix, " ")
-        self.assertEqual(self._daemon(before="", app="emacs", continuing=8).session.prefix, "")
+        spacing = Spacing()
+        self.assertEqual(spacing.owed("", "emacs", 7), "")
+        spacing.inserted(7, "First.", spacing.mark())
+        self.assertEqual(spacing.owed("", "emacs", 7), " ")
+        self.assertEqual(spacing.owed("", "firefox", 7), "", "a real empty field")
 
-    def test_unknown_surroundings_assume_continuation_in_the_same_window(self):
-        self.assertEqual(self._daemon(before=None, continuing=7).session.prefix, " ")
-        self.assertEqual(self._daemon(before=None, continuing=8).session.prefix, "")
-        self.assertEqual(self._daemon(before=None, continuing=None).session.prefix, "")
+    def test_unknown_surroundings_continue_only_our_own_text_in_the_same_window(self):
+        spacing = Spacing()
+        self.assertEqual(spacing.owed(None, "ghostty", 7), "")
+        spacing.inserted(7, "First.", spacing.mark())
+        self.assertEqual(spacing.owed(None, "ghostty", 7), " ")
+        self.assertEqual(spacing.owed(None, "ghostty", 8), "")
+        self.assertEqual(spacing.owed(None, None, None), "")
+        spacing.inserted(7, "First.\n", spacing.mark())
+        self.assertEqual(spacing.owed(None, "ghostty", 7), "", "ended with a newline")
 
-    def test_without_a_window_nothing_is_a_continuation(self):
-        daemon = self._daemon(before=None, continuing=None, window=None, app=None)
-        self.assertEqual(daemon.session.prefix, "")
+    def test_typing_in_between_hands_spacing_back_even_if_it_races_the_insertion(self):
+        spacing = Spacing()
+        mark = spacing.mark()
+        spacing.user_typed()          # arrives after the commit, before inserted()
+        spacing.inserted(7, "First.", mark)
+        self.assertEqual(spacing.owed(None, "ghostty", 7), "", "the user typed last")
+        spacing.inserted(7, "Again.", spacing.mark())
+        spacing.user_typed()
+        self.assertEqual(spacing.owed(None, "ghostty", 7), "")
 
-    def test_rapid_second_dictation_is_spaced_after_the_first_lands(self):
-        # Key-down while the first dictation is still transcribing: the
-        # preview predicts a space; delivery settles it from what really landed.
-        daemon = self._daemon(before=".", pending=True, last_window=7)
-        self.assertTrue(daemon.session.after_pending)
-        self.assertEqual(daemon.session.prefix, " ")
-        daemon.jobs.get_nowait()
-        daemon._continuing = 7  # the first dictation landed without trailing space
-        ime = FakeIme()
-        job = Job(np.zeros(1), "dictate", 1.0, 7, ImePreview(ime, 1), "live",
+    def test_prediction_assumes_our_landing_text_and_settlement_uses_what_landed(self):
+        spacing = Spacing()
+        spacing.landing = 7
+        self.assertEqual(spacing.predict(7, "ghostty", "."), " ")
+        self.assertEqual(spacing.predict(8, "ghostty", ""), "", "another window: not ours")
+        job = Job(np.zeros(1), "dictate", 1.0, 7, NotifyPreview("dictate"), "live",
                   "ghostty", ".", True)
-        with patch("voicekey.daemon.notify"), patch("voicekey.daemon.focus.window_id", return_value=7), \
-                patch("voicekey.daemon.time.monotonic", return_value=2.0):
-            daemon._deliver_dictation(job, "Second.")
-        self.assertEqual(ime.commits, [(" Second.", 1)])
-        daemon._continuing = None  # the first dictation ended with a newline
-        ime = FakeIme()
-        job = Job(np.zeros(1), "dictate", 1.0, 7, ImePreview(ime, 1), "live",
-                  "ghostty", ".", True)
-        with patch("voicekey.daemon.notify"), patch("voicekey.daemon.focus.window_id", return_value=7), \
-                patch("voicekey.daemon.time.monotonic", return_value=2.0):
-            daemon._deliver_dictation(job, "Second.")
-        self.assertEqual(ime.commits, [("Second.", 1)])
+        self.assertEqual(spacing.settle(job), "", "the stale '.' is ignored; nothing landed")
+        spacing.inserted(7, "First.", spacing.mark())
+        self.assertEqual(spacing.settle(job), " ")
+        job = Job(np.zeros(1), "dictate", 1.0, 7, NotifyPreview("dictate"), "live",
+                  "ghostty", "", False)
+        self.assertEqual(spacing.settle(job), "", "nothing was landing: the field's own report wins")
 
     def test_punctuation_joins_without_a_space(self):
         self.assertEqual(daemon_mod.spaced(" ", ", however"), ", however")
         self.assertEqual(daemon_mod.spaced(" ", "next"), " next")
         self.assertEqual(daemon_mod.spaced("", "next"), "next")
 
-    @patch("voicekey.daemon.notify")
-    @patch("voicekey.daemon.focus.window_id", return_value=7)
-    @patch("voicekey.daemon.time.monotonic", return_value=2.0)
-    def test_insertion_remembers_the_window_unless_text_ends_in_whitespace(self, _clock, _focus, _notify):
-        daemon = Daemon(Config())
-        daemon._deliver_dictation(_job("dictate", ImePreview(FakeIme(), 1), 7), "Hello.")
-        self.assertEqual(daemon._continuing, 7)
-        daemon._deliver_dictation(_job("dictate", ImePreview(FakeIme(), 1), 7), "Hello.\n")
-        self.assertIsNone(daemon._continuing)
 
-    def test_typing_in_between_leaves_spacing_to_the_user(self):
+class SpacingIntegrationTests(unittest.TestCase):
+    def _daemon(self, before=None, window=7, app="ghostty", landing=None, queued=None):
         daemon = Daemon(Config())
-        daemon._continuing = 7
-        daemon._on_activity()
-        self.assertEqual(daemon._prefix(None, "ghostty", 7), "")
+        daemon.recorder = FakeRecorder()
+        daemon.ime = FakeIme(generation=1)
+        daemon.ime.before_cursor = lambda: before
+        daemon.spacing.landing = landing
+        if queued:
+            daemon.jobs.put_nowait(_job(queued, window_id=9))
+        with patch("voicekey.daemon.notify"), _focused(window, app):
+            daemon._start("/dev/input/event3", frozenset(), "hold", "dictate", "release")
+        return daemon
+
+    def test_preview_and_commit_carry_the_predicted_space(self):
+        daemon = self._daemon(before=".")
+        daemon.session.preview.update("Second thought")
+        self.assertEqual(daemon.ime.preedits, [(" Second thought", 1)])
+        daemon.session.preview.commit("Second thought.")
+        self.assertEqual(daemon.ime.commits, [(" Second thought.", 1)])
+
+    def test_pending_agent_or_other_window_work_does_not_hide_the_field(self):
+        daemon = self._daemon(before="", queued="agent")
+        self.assertFalse(daemon.session.after_landing)
+        self.assertEqual(daemon.session.before, "")
+        self.assertEqual(daemon.session.prefix, "")
+        daemon = self._daemon(before="", landing=9)  # a dictation landing elsewhere
+        self.assertFalse(daemon.session.after_landing)
+        self.assertEqual(daemon.session.prefix, "")
+
+    def test_rapid_second_dictation_is_settled_after_the_first_lands(self):
+        daemon = self._daemon(before=".", landing=7)
+        self.assertTrue(daemon.session.after_landing)
+        self.assertEqual(daemon.session.prefix, " ")
+        daemon._finish()
+        daemon.jobs.get_nowait()
+        daemon.spacing.inserted(7, "First.", daemon.spacing.mark())
+        ime = FakeIme()
+        job = Job(np.zeros(1), "dictate", 1.0, 7, ImePreview(ime, 1), "live", "ghostty", ".", True)
+        with patch("voicekey.daemon.notify"), patch("voicekey.daemon.focus.window_id", return_value=7), \
+                patch("voicekey.daemon.time.monotonic", return_value=2.0):
+            daemon._deliver_dictation(job, "Second.")
+        self.assertEqual(ime.commits, [(" Second.", 1)])
+
+    def test_queued_dictation_marks_its_window_as_landing_until_delivered(self):
+        daemon = self._daemon()
+        daemon._finish()
+        self.assertEqual(daemon.spacing.landing, 7)
+        daemon.backend = Mock()
+        daemon.backend.transcribe.return_value = ""
+        job = daemon.jobs.get_nowait()
+        with patch("voicekey.daemon.notify"):
+            daemon._process(job)
+        # the worker's finally-clause clears it
+        if daemon.spacing.landing == job.window_id:
+            daemon.spacing.landing = None
+        self.assertIsNone(daemon.spacing.landing)
 
     @patch("voicekey.daemon.notify")
     @patch("voicekey.daemon.focus.window_id", return_value=7)
     @patch("voicekey.daemon.time.monotonic", return_value=2.0)
     def test_a_copy_leaves_the_spacing_state_alone(self, _clock, _focus, _notify):
         daemon = Daemon(Config())
-        daemon._continuing = 7
+        daemon.spacing.inserted(7, "Hello.", daemon.spacing.mark())
         preview = ImePreview(FakeIme(), 1)
         preview.ime.commit_result = False
         with patch("voicekey.daemon.inject_mod.copy"):
             daemon._deliver_dictation(_job("dictate", preview, 7), "Hello.")
-        self.assertEqual(daemon._continuing, 7, "the field was not changed by a copy")
+        self.assertEqual(daemon.spacing.owed(None, "ghostty", 7), " ")
 
 
 class BindingsTests(unittest.TestCase):

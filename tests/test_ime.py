@@ -168,6 +168,21 @@ class FailureTests(unittest.TestCase):
             self.assertTrue(ime._call(operation), "a started call reports its real result")
         self.assertGreaterEqual(time.monotonic() - began, 0.15)
 
+    def test_a_started_call_that_hangs_writes_the_connection_off(self):
+        ime = _offline_input_method()
+        release = threading.Event()
+
+        def operation():
+            release.wait(5)
+            return True
+
+        threading.Thread(target=lambda: ime._commands.get(timeout=2)(), daemon=True).start()
+        with patch.object(ime_mod, "CALL_TIMEOUT", 0.02), patch.object(ime_mod, "STARTED_TIMEOUT", 0.05):
+            self.assertFalse(ime._call(operation))
+        self.assertTrue(ime._dead)
+        self.assertIsNone(ime.activation())
+        release.set()
+
     def test_dead_connection_turns_everything_off(self):
         ime = _offline_input_method()
         ime._on_activate(None)

@@ -24,7 +24,8 @@ import threading
 
 log = logging.getLogger("voicekey.ime")
 
-CALL_TIMEOUT = 2.0  # seconds to wait for the loop thread before giving up
+CALL_TIMEOUT = 2.0  # seconds a call may stay pending before it is cancelled
+STARTED_TIMEOUT = 10.0  # seconds a started call may run before the connection is written off
 
 EVENTS = (
     "activate", "deactivate", "surrounding_text", "text_change_cause",
@@ -136,8 +137,10 @@ class InputMethod:
 
         A call still pending when the timeout expires is cancelled, so it
         cannot fire later — after the caller has delivered the text another
-        way. A call that has already started cannot be cancelled; then the
-        caller waits for its real result, since text may have landed."""
+        way. A call that has already started cannot be cancelled; the caller
+        waits for its real result, since text may have landed — but not
+        forever: a compositor that has hung for STARTED_TIMEOUT gets the
+        connection written off rather than the daemon wedged."""
         if self._dead:
             return False
         lock = threading.Lock()
@@ -162,7 +165,11 @@ class InputMethod:
                     state["cancelled"] = True
                     log.warning("the input method did not respond within %.0fs", CALL_TIMEOUT)
                     return False
-            done.wait()  # started: only its real outcome is safe to report
+            if not done.wait(STARTED_TIMEOUT):
+                log.error("the input method has hung; in-field text is off until restart")
+                self._dead = True
+                self._active = False
+                return False
         return bool(result and result[0])
 
     def close(self) -> None:

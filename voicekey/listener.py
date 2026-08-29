@@ -1,7 +1,8 @@
-"""evdev listener across all devices that provide the configured keys.
+"""evdev listener across the devices that provide the configured keys — and
+every other keyboard, only for the fact that a key was pressed (spacing).
 
 No EVIOCGRAB — the compositor still sees the held keys, so the bound keys must
-be inert in niri and apps (see desktop/niri/binds.kdl).
+be inert in the compositor and apps (see README "Install").
 
 Handles: full keyboards, separate laptop hotkey devices, hotplug (periodic
 rescan — docks, BT), device disconnect mid-hold, and the no-permission case
@@ -23,9 +24,16 @@ RESCAN_INTERVAL = 2.0
 NO_ACCESS_RETRY = 10.0
 
 
+TYPING_KEYS = {ecodes.KEY_A, ecodes.KEY_SPACE, ecodes.KEY_ENTER}
+
+
 def _supports_any_key(dev: InputDevice, keycodes: set[int]) -> bool:
     keys = dev.capabilities().get(ecodes.EV_KEY, [])
     return not keycodes.isdisjoint(keys)
+
+
+def _is_keyboard(dev: InputDevice) -> bool:
+    return _supports_any_key(dev, TYPING_KEYS)
 
 
 def all_event_devices() -> set[str]:
@@ -74,7 +82,7 @@ class KeyboardListener:
             except OSError:
                 continue
             try:
-                is_relevant = _supports_any_key(dev, self.keycodes)
+                is_relevant = _supports_any_key(dev, self.keycodes) or _is_keyboard(dev)
             except OSError:
                 dev.close()
                 continue
