@@ -31,7 +31,9 @@ key up    ─ buffer ─ offline model ─ final text ─ commit in place of the
   itself and swaps it for the committed string; nothing is ever inserted and
   later deleted. Applications without text-input support get the preview in
   a notification and the final text via `wtype`. Because the streaming
-  decoder is greedy, the live text only ever grows.
+  decoder is greedy, the live text only ever grows. voicekey takes the
+  seat's input method afresh at every key-down, so it cannot coexist with
+  another IME such as fcitx; set `ime = false` if you need one.
 - **Focus is respected.** Text is committed only into the field that was
   active when the key went down; if focus moved, the transcript is copied to
   the clipboard instead of being typed somewhere wrong.

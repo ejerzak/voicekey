@@ -47,26 +47,22 @@ class InputMethod:
             self._display.connect()
         except Exception as exc:
             raise ImeUnavailable(f"cannot connect to the Wayland display: {exc}")
-        seat = manager = None
+        self._seat = self._manager = None
 
         def on_global(registry, name, interface, version):
-            nonlocal seat, manager
-            if interface == "wl_seat" and seat is None:
-                seat = registry.bind(name, WlSeat, min(version, 7))
+            if interface == "wl_seat" and self._seat is None:
+                self._seat = registry.bind(name, WlSeat, min(version, 7))
             elif interface == "zwp_input_method_manager_v2":
-                manager = registry.bind(name, ZwpInputMethodManagerV2, 1)
+                self._manager = registry.bind(name, ZwpInputMethodManagerV2, 1)
 
         registry = self._display.get_registry()
         registry.dispatcher["global"] = on_global
         self._display.roundtrip()
-        if seat is None or manager is None:
+        if self._seat is None or self._manager is None:
             self._display.disconnect()
             raise ImeUnavailable("the compositor does not offer zwp_input_method_v2")
-        self._im = manager.get_input_method(seat)
-        for event in EVENTS:
-            self._im.dispatcher[event] = getattr(self, f"_on_{event}")
-        self._display.roundtrip()
-        if self._unavailable:
+        self._im = None
+        if not self._bind():
             self._display.disconnect()
             raise ImeUnavailable("another input method is already bound")
         self._thread = threading.Thread(target=self._run, name="ime", daemon=True)
@@ -82,23 +78,51 @@ class InputMethod:
         self._commands: queue.SimpleQueue = queue.SimpleQueue()
         self._wake_r, self._wake_w = os.pipe()
 
+    def _bind(self) -> bool:
+        """(Re)create our input-method object.
+
+        niri (smithay) keeps one input method per seat, and destroying *any*
+        input-method object — even another client's stale one — silently
+        drops the current instance without telling it. So the daemon rebinds
+        before every recording: that reclaims the seat and guarantees the
+        activation state that follows is fresh."""
+        if self._im is not None:
+            self._im.destroy()
+        self._unavailable = False
+        self._active = self._pending_active = False
+        self._im = self._manager.get_input_method(self._seat)
+        for event in EVENTS:
+            self._im.dispatcher[event] = getattr(self, f"_on_{event}")
+        self._display.roundtrip()
+        return not self._unavailable
+
     # --- public, any thread ---
 
     def activation(self) -> int | None:
         """Generation of the current activation, or None when no field is active."""
-        return self._generation if self._active else None
+        return self._generation if self._active and not self._unavailable else None
+
+    def rebind(self) -> bool:
+        """Bind afresh; the activation for a focused field follows shortly."""
+        return self._call(self._bind)
 
     def preedit(self, text: str, generation: int) -> None:
         self._post(lambda: self._apply(generation, preedit=text))
 
     def commit(self, text: str, generation: int) -> bool:
         """Insert TEXT in place of the preedit. False if the field went away."""
+        return self._call(lambda: self._apply(generation, commit=text))
+
+    def _call(self, function) -> bool:
+        """Run FUNCTION on the loop thread and wait for its result."""
         done = threading.Event()
         result = []
 
         def run():
-            result.append(self._apply(generation, commit=text))
-            done.set()
+            try:
+                result.append(bool(function()))
+            finally:
+                done.set()
 
         self._post(run)
         done.wait(2.0)
@@ -137,12 +161,15 @@ class InputMethod:
 
     def _on_unavailable(self, im) -> None:
         self._unavailable = True
+        self._active = self._pending_active = False
+        log.warning("another client bound the input method; "
+                    "in-field text is off until the next recording")
 
     # --- requests (loop thread) ---
 
     def _apply(self, generation: int, *, preedit: str | None = None,
                commit: str | None = None) -> bool:
-        if not self._active or self._generation != generation:
+        if self._unavailable or not self._active or self._generation != generation:
             return False
         if commit is not None:
             self._im.set_preedit_string("", 0, 0)

@@ -18,7 +18,7 @@ import queue
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from evdev import ecodes
@@ -116,9 +116,24 @@ class Session:
     chord: frozenset[int]
     device: str
     window_id: int | None
-    preview: NotifyPreview | ImePreview
+    ime: InputMethod | None  # None: in-field text not allowed for this recording
     stream: object | None
     text: str = ""
+    _preview: NotifyPreview | ImePreview | None = field(default=None, init=False)
+
+    @property
+    def preview(self) -> NotifyPreview | ImePreview:
+        """Chosen when first needed — about a second in, once the input
+        method rebound at key-down has been activated by the focused field."""
+        if self._preview is None:
+            generation = self.ime.activation() if self.ime is not None else None
+            self._preview = (
+                ImePreview(self.ime, generation) if generation is not None
+                else NotifyPreview(self.action)
+            )
+            log.info("%s: %s preview", self.action,
+                     "in-field" if generation is not None else "notification")
+        return self._preview
 
     def feed(self, frame: np.ndarray) -> None:  # recorder thread
         if self.stream is not None:
@@ -285,21 +300,15 @@ class Daemon:
             self.ime is not None and action == "dictate"
             and (window_id is not None or not self.cfg.dictation.require_same_window)
         )
-        generation = self.ime.activation() if in_field else None
-        preview = (
-            ImePreview(self.ime, generation) if generation is not None
-            else NotifyPreview(action)
-        )
+        ime = self.ime if in_field and self.ime.rebind() else None
         stream = self.streaming.session() if self.streaming else None
-        session = Session(action, behavior, chord, device, window_id, preview, stream)
+        session = Session(action, behavior, chord, device, window_id, ime, stream)
         try:
             self.recorder.start(session.feed)
         except OSError as exc:
             notify("voicekey: recording failed", str(exc), error=True)
             return
         self.session = session
-        log.info("%s: %s preview", action,
-                 "in-field" if isinstance(preview, ImePreview) else "notification")
         notify(f"● Recording ({LABEL[action]})", stop_instruction, ms=60000, channel=action)
 
     def _finish(self) -> None:

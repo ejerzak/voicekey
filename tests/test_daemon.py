@@ -41,6 +41,9 @@ class FakeIme:
     def activation(self):
         return self.generation
 
+    def rebind(self):
+        return True
+
     def preedit(self, text, generation):
         self.preedits.append((text, generation))
 
@@ -166,8 +169,9 @@ class SessionTests(unittest.TestCase):
         )))
 
         daemon._on_key("/dev/input/event3", code, 1)
-        self.assertIsInstance(daemon.session.preview, ImePreview)
+        self.assertIs(daemon.session.ime, daemon.ime)
         daemon.recorder.on_frame(np.zeros(1600, dtype=np.float32))
+        self.assertIsInstance(daemon.session.preview, ImePreview)
         daemon.recorder.on_frame(np.zeros(1600, dtype=np.float32))
         daemon._on_key("/dev/input/event3", code, 0)
 
