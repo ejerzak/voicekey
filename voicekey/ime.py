@@ -90,6 +90,7 @@ class InputMethod:
             self._im.destroy()
         self._unavailable = False
         self._active = self._pending_active = False
+        self._serial = 0  # the compositor counts `done` per object
         self._im = self._manager.get_input_method(self._seat)
         for event in EVENTS:
             self._im.dispatcher[event] = getattr(self, f"_on_{event}")
@@ -171,10 +172,14 @@ class InputMethod:
                commit: str | None = None) -> bool:
         if self._unavailable or not self._active or self._generation != generation:
             return False
+        # Text-input state is double-buffered and resets on every commit, so a
+        # commit that carries no preedit request *removes* the preedit. Never
+        # send an empty preedit string instead: GTK treats "" as a preedit that
+        # is still present and skips preedit-end, which leaves Ghostty in its
+        # composing state, swallowing every printable key.
         if commit is not None:
-            self._im.set_preedit_string("", 0, 0)
             self._im.commit_string(commit)
-        else:
+        elif preedit:
             end = len(preedit.encode())
             self._im.set_preedit_string(preedit, end, end)
         self._im.commit(self._serial)

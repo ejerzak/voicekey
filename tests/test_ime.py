@@ -90,9 +90,14 @@ class ActivationTests(unittest.TestCase):
         ime._on_activate(None)
         ime._on_done(None)
         self.assertTrue(ime._apply(1, commit="final text"))
-        self.assertEqual(ime._im.calls, [
-            ("preedit", "", 0, 0), ("commit_string", "final text"), ("commit", 1),
-        ])
+        self.assertEqual(ime._im.calls, [("commit_string", "final text"), ("commit", 1)])
+
+    def test_clearing_sends_a_bare_commit_never_an_empty_preedit(self):
+        ime = _offline_input_method()
+        ime._on_activate(None)
+        ime._on_done(None)
+        self.assertTrue(ime._apply(1, preedit=""))
+        self.assertEqual(ime._im.calls, [("commit", 1)])
 
 
 class TakeoverTests(unittest.TestCase):
