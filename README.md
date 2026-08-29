@@ -34,9 +34,17 @@ key up    ─ buffer ─ offline model ─ final text ─ commit in place of the
   decoder is greedy, the live text only ever grows. voicekey takes the
   seat's input method afresh at every key-down, so it cannot coexist with
   another IME such as fcitx; set `ime = false` if you need one.
-- **Focus is respected.** Text is committed only into the field that was
-  active when the key went down; if focus moved, the transcript is copied to
-  the clipboard instead of being typed somewhere wrong.
+- **Focus is respected.** In-field text carries the activation of the field
+  that was active at key-down; if that field is gone by the time the final
+  pass lands — you clicked elsewhere, or the app blinked its text input —
+  the transcript is copied to the clipboard and a notification says so.
+  Nothing is ever typed into a different field. Notification-mode dictation
+  gets the weaker guard niri can offer: same *window*, or copy. Pressing the
+  key again while the previous text is still landing is fine; the earlier
+  text lands first.
+- **Audio comes first.** Capture starts before anything else at key-down, and
+  the live recognizer decodes on its own thread; if it falls behind, only
+  the preview is dropped, never microphone audio for the final pass.
 
 ## Install
 
@@ -87,12 +95,13 @@ every recording — the way to compare models on your own voice.
 | `[backend]` | final pass: `parakeet` (CPU) or `faster-whisper` (CUDA) and its model |
 | `[streaming] model_dir` | live-preview model; `""` disables the preview |
 | `[dictation] ime` | use the input method for preview and commit (default true) |
-| `[dictation] inject` | fallback delivery: `wtype` or `clipboard` |
+| `[dictation] inject` | delivery without an input method: `wtype` (type it) or `clipboard` (copy it and say so) |
 | `[dictation] require_same_window` | copy instead of typing if niri focus changed |
 | `[agent]` | Hermes target, local or over SSH via Tailscale |
 
-`install.sh` downloads whichever sherpa-onnx models the config names; the
-known ones are listed in `voicekey/backends.py`.
+`install.sh` downloads whichever sherpa-onnx models the config names and
+checks their SHA-256 digests; the known ones are listed in
+`voicekey/backends.py`.
 
 ## Agent dispatch
 
@@ -118,6 +127,8 @@ timeout it is written to the recovery file instead of typed into a dialog.
 - Taps shorter than `min_seconds` are discarded; recordings longer than
   `max_seconds` are aborted (stuck key).
 - Dictation older than `max_delay_seconds` is copied, not typed.
+- If `wtype` fails, the text is copied and the notification says so; no
+  paste keystroke is simulated (terminals read Ctrl+V as "literal next key").
 - Agent prompts are pasted only when Hermes is idle with an empty composer;
   voicekey never answers approval prompts. Hermes slash, shell and path
   syntax is neutralized in voice input.

@@ -25,8 +25,8 @@ model_dir = "~/.local/share/voicekey/sherpa-onnx-nemotron-speech-streaming-en-0.
 
 [dictation]
 ime = true                 # live text and final commit through the Wayland input method
-inject = "wtype"           # fallback when the focused app has no text-input support:
-                           # "wtype" (direct typing) | "clipboard" (wl-copy + ctrl+v)
+inject = "wtype"           # when the focused app has no text-input support:
+                           # "wtype" (type it) | "clipboard" (copy it and say so)
 max_delay_seconds = 10.0   # older transcripts are copied, never typed late
 require_same_window = true # copy instead if niri focus changed during transcription
 

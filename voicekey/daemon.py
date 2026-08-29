@@ -3,11 +3,12 @@
 Hold a key: the microphone streams into the live recognizer and the partial
 text is previewed — as preedit in the focused field when its application
 speaks the input-method protocol, otherwise in a notification. Release: the
-whole recording gets a second, offline pass (more accurate, better punctuation)
-and that text replaces the preedit, or is typed or copied when there is no
-IME target. Agent prompts share the pipeline up to transcription, then go to
-Hermes through their own queue and worker, so a busy agent never delays
-dictation."""
+whole recording gets a second, offline pass (more accurate, better
+punctuation) and that text replaces the preedit. If the field that was active
+at key-down is gone by then, the text is copied to the clipboard instead —
+never typed somewhere else. Agent prompts share the pipeline up to
+transcription, then go to Hermes through their own queue and worker, so a
+busy agent never delays dictation."""
 
 from __future__ import annotations
 
@@ -18,7 +19,7 @@ import queue
 import sys
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 from evdev import ecodes
@@ -42,6 +43,8 @@ TOGGLE = "toggle"
 TRANSCRIPTION_QUEUE_SIZE = 4
 AGENT_QUEUE_SIZE = 8
 PREVIEW_INTERVAL = 0.25  # seconds between notification updates
+ACTIVATION_WAIT = 0.2  # seconds to wait for the focused field after binding
+OVERLOAD_FRAMES = 30  # 3 s of audio the live recognizer may fall behind
 
 
 def _keycode(name: str) -> int:
@@ -86,12 +89,11 @@ class NotifyPreview:
     def clear(self) -> None:
         pass  # the next status notification replaces it
 
-    def commit(self, text: str) -> bool:
-        return False
-
 
 class ImePreview:
-    """Live text as preedit in the focused field; commit replaces it in place."""
+    """Live text as preedit in the field active at key-down; commit replaces
+    it in place. Both carry that field's activation generation, so nothing
+    reaches a field that gained focus later."""
 
     def __init__(self, ime: InputMethod, generation: int) -> None:
         self.ime = ime
@@ -109,39 +111,83 @@ class ImePreview:
 
 # --- one held key -----------------------------------------------------------
 
-@dataclass
 class Session:
-    action: str
-    behavior: str
-    chord: frozenset[int]
-    device: str
-    window_id: int | None
-    ime: InputMethod | None  # None: in-field text not allowed for this recording
-    stream: object | None
-    text: str = ""
-    _preview: NotifyPreview | ImePreview | None = field(default=None, init=False)
+    """One held key, from press to release. Audio frames arrive on the
+    recorder thread and are decoded on their own thread, so a slow live
+    recognizer can only lose the preview, never microphone audio."""
+
+    def __init__(self, action: str, behavior: str, chord: frozenset[int],
+                 device: str, window_id: int | None, stream) -> None:
+        self.action = action
+        self.behavior = behavior
+        self.chord = chord
+        self.device = device
+        self.window_id = window_id
+        self.preview: NotifyPreview | ImePreview = NotifyPreview(action)
+        self.text = ""
+        self._stream = stream
+        self._frames: queue.Queue = queue.Queue(maxsize=OVERLOAD_FRAMES)
+        self._decoder: threading.Thread | None = None
+        if stream is not None:
+            self._decoder = threading.Thread(
+                target=self._decode, name="live-decode", daemon=True
+            )
+            self._decoder.start()
 
     @property
-    def preview(self) -> NotifyPreview | ImePreview:
-        """Chosen when first needed — about a second in, once the input
-        method rebound at key-down has been activated by the focused field."""
-        if self._preview is None:
-            generation = self.ime.activation() if self.ime is not None else None
-            self._preview = (
-                ImePreview(self.ime, generation) if generation is not None
-                else NotifyPreview(self.action)
-            )
-            log.info("%s: %s preview", self.action,
-                     "in-field" if generation is not None else "notification")
-        return self._preview
+    def live(self) -> bool:
+        return self._stream is not None
 
-    def feed(self, frame: np.ndarray) -> None:  # recorder thread
-        if self.stream is not None:
-            self._show(self.stream.feed(frame))
+    def feed(self, frame: np.ndarray) -> None:  # recorder thread; never blocks
+        if self._stream is None:
+            return
+        try:
+            self._frames.put_nowait(frame)
+        except queue.Full:
+            self._drop("live recognition fell behind; preview off for this recording")
+
+    def _decode(self) -> None:  # decode thread
+        while (frame := self._frames.get()) is not None:
+            stream = self._stream
+            if stream is None:
+                return
+            try:
+                self._show(stream.feed(frame))
+            except Exception:
+                log.exception("live recognition failed; preview off for this recording")
+                self._stream = None
+                return
 
     def finish(self) -> None:
-        if self.stream is not None:
-            self._show(self.stream.finish())
+        """Flush the live recognizer; returns once its text is final."""
+        stream = self._stream
+        if stream is None:
+            return
+        try:
+            self._frames.put_nowait(None)
+        except queue.Full:
+            self._drop("live recognition fell behind at release")
+            return
+        self._decoder.join(3.0)
+        if self._decoder.is_alive() or self._stream is None:
+            self._drop("live recognition did not finish in time")
+            return
+        try:
+            self._show(stream.finish())
+        except Exception:
+            log.exception("live recognition failed at release")
+            self._stream = None
+
+    def cancel(self) -> None:
+        self._stream = None
+        try:
+            self._frames.put_nowait(None)
+        except queue.Full:
+            pass
+
+    def _drop(self, reason: str) -> None:
+        log.warning(reason)
+        self.cancel()
 
     def _show(self, text: str) -> None:
         if text and text != self.text:
@@ -294,33 +340,52 @@ class Daemon:
             if action == "dictate" and self.cfg.dictation.require_same_window
             else None
         )
-        # In-field text needs a real focused window: a lock screen or launcher
-        # can activate the input method too, and text must never land there.
-        in_field = (
-            self.ime is not None and action == "dictate"
-            and (window_id is not None or not self.cfg.dictation.require_same_window)
-        )
-        ime = self.ime if in_field and self.ime.rebind() else None
         stream = self.streaming.session() if self.streaming else None
-        session = Session(action, behavior, chord, device, window_id, ime, stream)
+        session = Session(action, behavior, chord, device, window_id, stream)
         try:
-            self.recorder.start(session.feed)
+            self.recorder.start(session.feed)  # capture first; the field can wait
         except OSError as exc:
+            session.cancel()
             notify("voicekey: recording failed", str(exc), error=True)
             return
         self.session = session
+        # In-field text needs a real focused window: a lock screen or launcher
+        # can activate the input method too, and text must never land there.
+        if (action == "dictate" and self.ime is not None
+                and (window_id is not None or not self.cfg.dictation.require_same_window)):
+            generation = self._bind_field()
+            if generation is not None:
+                session.preview = ImePreview(self.ime, generation)
+        log.info("%s: %s preview", action,
+                 "in-field" if isinstance(session.preview, ImePreview) else "notification")
         notify(f"● Recording ({LABEL[action]})", stop_instruction, ms=60000, channel=action)
+
+    def _bind_field(self) -> int | None:
+        """Generation of the field active right now, or None.
+
+        Binds afresh — the compositor drops our binding whenever another
+        client touches the input method — unless a previous dictation is
+        still landing: a rebind would cancel its ticket, and a binding that
+        was live a second ago is trusted instead."""
+        if self.jobs.unfinished_tasks == 0 and not self.ime.rebind():
+            return None
+        deadline = time.monotonic() + ACTIVATION_WAIT
+        while (generation := self.ime.activation()) is None and time.monotonic() < deadline:
+            time.sleep(0.005)
+        return generation
 
     def _finish(self) -> None:
         session, self.session = self.session, None
         try:
             samples, duration = self.recorder.stop()
         except RecordingError as exc:
+            session.cancel()
             session.preview.clear()
             notify("voicekey: recording failed", str(exc), error=True)
             return
         if duration < self.cfg.min_seconds:
             log.info("discarded %.2fs tap", duration)
+            session.cancel()
             session.preview.clear()
             notify("voicekey", "cancelled (tap)", ms=1000, channel=session.action)
             return
@@ -336,6 +401,7 @@ class Daemon:
 
     def _abort(self, message: str) -> None:
         session, self.session = self.session, None
+        session.cancel()
         self.recorder.abort()
         session.preview.clear()
         notify("voicekey", message, error=True)
@@ -372,7 +438,10 @@ class Daemon:
         notify("⋯ Transcribing", ms=30000, channel=job.action)
         text = self.backend.transcribe(job.samples)
         if self.cfg.recordings_dir:
-            recovery.keep(self.cfg.recordings_dir, job.samples, job.live_text, text)
+            try:
+                recovery.keep(self.cfg.recordings_dir, job.samples, job.live_text, text)
+            except Exception as exc:
+                log.warning("could not keep the recording: %s", exc)
         if not text:
             job.preview.clear()
             notify("voicekey", "no speech detected", channel=job.action)
@@ -395,40 +464,41 @@ class Daemon:
             job.preview.clear()
             self._copy_instead(text, f"dictation was {age:.1f}s old; copied instead of typing")
             return
-        if job.preview.commit(text):
-            log.info("committed in place")
+        if isinstance(job.preview, ImePreview):
+            if self._same_window(job) and job.preview.commit(text):
+                log.info("committed in place")
+                notify("✓ Typed", channel="dictate")
+                return
+            job.preview.clear()
+            self._copy_instead(text, "the field changed; copied instead of typing")
+            return
+        if not self._same_window(job):
+            self._copy_instead(text, "focus changed; copied instead of typing")
+            return
+        if self.cfg.dictation.inject == "wtype":
+            try:
+                inject_mod.type_text(text)
+            except Exception as exc:
+                self._copy_instead(text, f"typing failed ({exc}); copied instead")
+                return
+            log.info("typed via wtype")
             notify("✓ Typed", channel="dictate")
             return
-        job.preview.clear()
-        if self.cfg.dictation.require_same_window:
-            current = focus.window_id()
-            if job.window_id is None or current is None:
-                self._copy_instead(text, "could not verify focus; copied instead of typing")
-                return
-            if current != job.window_id:
-                self._copy_instead(text, "focus changed; copied instead of typing")
-                return
-        try:
-            method = inject_mod.inject(text, self.cfg.dictation.inject)
-        except Exception as exc:
-            self._delivery_failed("voicekey: typing failed", str(exc), text)
-            return
-        suffix = (
-            " via clipboard paste"
-            if method == "clipboard" and self.cfg.dictation.inject != "clipboard"
-            else ""
-        )
-        log.info("typed via %s", method)
-        notify("✓ Typed" + suffix, channel="dictate")
+        self._copy_instead(text, "", summary="📋 Copied")
 
-    def _copy_instead(self, text: str, reason: str) -> None:
-        log.info("not typed: %s", reason)
+    def _same_window(self, job: Job) -> bool:
+        if not self.cfg.dictation.require_same_window:
+            return True
+        return job.window_id is not None and focus.window_id() == job.window_id
+
+    def _copy_instead(self, text: str, reason: str, *, summary: str = "voicekey: not typed") -> None:
+        log.info("not typed: %s", reason or "copied")
         try:
             inject_mod.copy(text)
         except Exception as exc:
             self._delivery_failed("voicekey: clipboard failed", str(exc), text)
             return
-        notify("voicekey: not typed", reason, ms=10000, channel="dictate")
+        notify(summary, reason, ms=10000, channel="dictate")
 
     def _agent_worker(self) -> None:
         while True:

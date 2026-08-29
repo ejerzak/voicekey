@@ -1,11 +1,13 @@
 """Desktop notifications. Every user-visible state change and every error path
-goes through here — silent failure is the worst outcome. notify() itself must
-never raise."""
+goes through here — silent failure is the worst outcome. notify() never raises
+and never blocks the caller: one worker thread sends them, in order."""
 
 from __future__ import annotations
 
 import logging
+import queue
 import subprocess
+import threading
 
 log = logging.getLogger("voicekey.notify")
 
@@ -16,10 +18,24 @@ _REPLACE_IDS = {
     "agent": "91022",
     "system": "91023",
 }
+_pending: queue.SimpleQueue = queue.SimpleQueue()
+_worker: threading.Thread | None = None
+_lock = threading.Lock()
+
+
+def _send() -> None:
+    while True:
+        cmd = _pending.get()
+        try:
+            subprocess.run(cmd, timeout=5, check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as exc:
+            log.warning("notify-send failed: %s", exc)
 
 
 def notify(summary: str, body: str = "", *, error: bool = False,
            ms: int = 6000, channel: str = "system") -> None:
+    global _worker
     cmd = ["notify-send", "-a", "voicekey"]
     if error:
         cmd += ["-u", "critical"]
@@ -30,8 +46,8 @@ def notify(summary: str, body: str = "", *, error: bool = False,
     cmd.append(summary)
     if body:
         cmd.append(body)
-    try:
-        subprocess.run(cmd, timeout=5, check=False,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception as e:
-        log.warning("notify-send failed: %s", e)
+    with _lock:
+        if _worker is None:
+            _worker = threading.Thread(target=_send, name="notify", daemon=True)
+            _worker.start()
+    _pending.put(cmd)

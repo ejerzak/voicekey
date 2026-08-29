@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ctypes
 import glob
+import hashlib
 import logging
 import os
 import shutil
@@ -28,16 +29,23 @@ log = logging.getLogger("voicekey.backends")
 SAMPLE_RATE = 16000
 NUM_THREADS = 4  # 2-4 is the sweet spot on a desktop CPU; more is slower
 RELEASES = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
-# sherpa-onnx model archives. Each unpacks to <name>/ holding MODEL_FILES.
-MODELS = {
-    name: f"{RELEASES}{name}.tar.bz2"
-    for name in (
-        "sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-non-streaming",
-        "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8",
-        "sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25",
-    )
-}
 MODEL_FILES = ("encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt")
+# sherpa-onnx model archives: each unpacks to <name>/ holding MODEL_FILES,
+# whose SHA-256 digests are checked after download.
+MODELS = {
+    "sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-non-streaming": {
+        "encoder.int8.onnx": "6716910b7a0833997fec7a410494c995d70124001a0e9b66d6370d6aced577e0",
+        "decoder.int8.onnx": "a5e223392c90e75f8144cdb5eb95af7625db389e39edef2bd1a9c872b3298fe6",
+        "joiner.int8.onnx": "869f43f7d24595c55581ad3bf249a935fb8a71389fbdaa7504b9f46f93140f8a",
+        "tokens.txt": "dc0b4584ab2e4ddbf888425c076c61b736e7356a015250db7d307e6f1a8188ff",
+    },
+    "sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25": {
+        "encoder.int8.onnx": "7d932213491ad355c6e5576705dc3494731a52af87d7a1b954559340147909d8",
+        "decoder.int8.onnx": "0be9702c2f427a2b6bb241d298e0d3836a558de1f5b9fd3018f1cce6e2b3fa98",
+        "joiner.int8.onnx": "a35eac38a22ebceb04d230ed7afe0d68f446ba6914a036b97f14fece95967e23",
+        "tokens.txt": "dc0b4584ab2e4ddbf888425c076c61b736e7356a015250db7d307e6f1a8188ff",
+    },
+}
 
 
 class BackendUnavailable(Exception):
@@ -226,6 +234,14 @@ def _extract(archive_path: Path, destination: Path) -> None:
             archive.extract(member, destination, filter="fully_trusted")
 
 
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def ensure_model(model_dir: str) -> None:
     """Download and unpack a known sherpa-onnx model unless it is complete."""
     model_dir = Path(os.path.expanduser(model_dir))
@@ -236,12 +252,13 @@ def ensure_model(model_dir: str) -> None:
         raise BackendUnavailable(
             f"{model_dir} exists but is incomplete — remove it and retry"
         )
-    url = MODELS.get(model_dir.name)
-    if url is None:
+    digests = MODELS.get(model_dir.name)
+    if digests is None:
         raise BackendUnavailable(
             f"no download is known for model {model_dir.name!r}; "
             f"known models: {', '.join(MODELS)}"
         )
+    url = f"{RELEASES}{model_dir.name}.tar.bz2"
     model_dir.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
         prefix=f".{model_dir.name}-", dir=model_dir.parent
@@ -259,6 +276,12 @@ def ensure_model(model_dir: str) -> None:
             raise BackendUnavailable(
                 f"downloaded archive is missing: {', '.join(missing)}"
             )
+        for name, digest in digests.items():
+            if _sha256(candidate / name) != digest:
+                raise BackendUnavailable(
+                    f"checksum mismatch for {name} in {model_dir.name} — "
+                    "the download is corrupt or the archive changed"
+                )
         shutil.move(str(candidate), str(model_dir))
     print(f"model ready at {model_dir}")
 

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
+from voicekey import ime as ime_mod
 from voicekey.ime import InputMethod
 
 
@@ -127,6 +129,27 @@ class TakeoverTests(unittest.TestCase):
         ime._on_activate(None)
         ime._on_done(None)
         self.assertEqual(ime.activation(), 2)
+
+
+class FailureTests(unittest.TestCase):
+    def test_timed_out_call_is_cancelled_not_run_later(self):
+        ime = _offline_input_method()  # no loop thread: every call times out
+        ran = []
+        with patch.object(ime_mod, "CALL_TIMEOUT", 0.01):
+            self.assertFalse(ime._call(lambda: ran.append(1) or True))
+        queued = ime._commands.get_nowait()
+        queued()  # the loop thread catching up later must be a no-op
+        self.assertEqual(ran, [])
+
+    def test_dead_connection_turns_everything_off(self):
+        ime = _offline_input_method()
+        ime._on_activate(None)
+        ime._on_done(None)
+        ime._dead = True
+        self.assertIsNone(ime.activation())
+        self.assertFalse(ime._call(lambda: True))
+        ime.preedit("x", 1)
+        self.assertTrue(ime._commands.empty())
 
 
 if __name__ == "__main__":

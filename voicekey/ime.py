@@ -10,7 +10,9 @@ and wtype.
 
 One connection, one thread. ``preedit`` is fire-and-forget, ``commit`` waits.
 Every request names the activation *generation* it belongs to, so text never
-lands in a field that gained focus after the recording started."""
+lands in a field that gained focus after the recording started. If the
+connection dies the object turns itself off: ``activation()`` is None and
+requests are dropped, so the daemon degrades to notifications and typing."""
 
 from __future__ import annotations
 
@@ -21,6 +23,8 @@ import select
 import threading
 
 log = logging.getLogger("voicekey.ime")
+
+CALL_TIMEOUT = 2.0  # seconds to wait for the loop thread before giving up
 
 EVENTS = (
     "activate", "deactivate", "surrounding_text", "text_change_cause",
@@ -74,6 +78,7 @@ class InputMethod:
         self._generation = 0
         self._serial = 0  # number of `done` events received; echoed in commit()
         self._unavailable = False
+        self._dead = False
         self._closing = False
         self._commands: queue.SimpleQueue = queue.SimpleQueue()
         self._wake_r, self._wake_w = os.pipe()
@@ -101,7 +106,9 @@ class InputMethod:
 
     def activation(self) -> int | None:
         """Generation of the current activation, or None when no field is active."""
-        return self._generation if self._active and not self._unavailable else None
+        if self._dead or self._unavailable or not self._active:
+            return None
+        return self._generation
 
     def rebind(self) -> bool:
         """Bind afresh; the activation for a focused field follows shortly."""
@@ -115,18 +122,27 @@ class InputMethod:
         return self._call(lambda: self._apply(generation, commit=text))
 
     def _call(self, function) -> bool:
-        """Run FUNCTION on the loop thread and wait for its result."""
+        """Run FUNCTION on the loop thread and wait for its result. A call
+        that times out is cancelled, so it cannot fire later — after the
+        caller has already delivered the text another way."""
+        if self._dead:
+            return False
         done = threading.Event()
+        cancelled = threading.Event()
         result = []
 
         def run():
+            if cancelled.is_set():
+                return
             try:
                 result.append(bool(function()))
             finally:
                 done.set()
 
         self._post(run)
-        done.wait(2.0)
+        if not done.wait(CALL_TIMEOUT):
+            cancelled.set()
+            log.warning("the input method did not respond within %.0fs", CALL_TIMEOUT)
         return bool(result and result[0])
 
     def close(self) -> None:
@@ -187,25 +203,36 @@ class InputMethod:
         return True
 
     def _post(self, command) -> None:
+        if self._dead:
+            return
         self._commands.put(command)
         os.write(self._wake_w, b"x")
 
     def _run(self) -> None:
-        fd = self._display.get_fd()
-        while not self._closing:
-            self._display.flush()
-            readable, _, _ = select.select([fd, self._wake_r], [], [], 1.0)
-            if fd in readable:
-                self._display.dispatch(block=True)
-            if self._wake_r in readable:
-                os.read(self._wake_r, 4096)
-            while True:
-                try:
-                    command = self._commands.get_nowait()
-                except queue.Empty:
-                    break
-                try:
-                    command()
-                except Exception:
-                    log.exception("input-method request failed")
-        self._display.disconnect()
+        try:
+            fd = self._display.get_fd()
+            while not self._closing:
+                self._display.flush()
+                readable, _, _ = select.select([fd, self._wake_r], [], [], 1.0)
+                if fd in readable:
+                    self._display.dispatch(block=True)
+                if self._wake_r in readable:
+                    os.read(self._wake_r, 4096)
+                while True:
+                    try:
+                        command = self._commands.get_nowait()
+                    except queue.Empty:
+                        break
+                    try:
+                        command()
+                    except Exception:
+                        log.exception("input-method request failed")
+        except Exception:
+            log.exception("input method connection failed; in-field text is off")
+        finally:
+            self._dead = True
+            self._active = False
+            try:
+                self._display.disconnect()
+            except Exception:
+                pass

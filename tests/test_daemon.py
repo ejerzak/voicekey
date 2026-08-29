@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import threading
+import time
 import unittest
 from unittest.mock import Mock, patch
 
 import numpy as np
 
+from voicekey import daemon as daemon_mod
 from voicekey.config import Config
 from voicekey.daemon import Daemon, ImePreview, Job, NotifyPreview, Session
+
+FRAME = np.zeros(1600, dtype=np.float32)
 
 
 class FakeRecorder:
@@ -32,16 +37,22 @@ class FakeRecorder:
 
 
 class FakeIme:
-    def __init__(self, generation=1):
+    def __init__(self, generation=1, activation_delay_calls=0):
         self.generation = generation
         self.preedits = []
         self.commits = []
         self.commit_result = True
+        self.rebinds = 0
+        self._delay = activation_delay_calls
 
     def activation(self):
+        if self._delay > 0:
+            self._delay -= 1
+            return None
         return self.generation
 
     def rebind(self):
+        self.rebinds += 1
         return True
 
     def preedit(self, text, generation):
@@ -53,10 +64,13 @@ class FakeIme:
 
 
 class FakeStream:
-    def __init__(self, texts):
+    def __init__(self, texts, fail=False):
         self.texts = list(texts)
+        self.fail = fail
 
     def feed(self, frame):
+        if self.fail:
+            raise RuntimeError("decoder exploded")
         return self.texts.pop(0)
 
     def finish(self):
@@ -68,7 +82,13 @@ def _job(action, preview=None, window_id=None):
                preview or NotifyPreview(action), "live")
 
 
-class DaemonRoutingTests(unittest.TestCase):
+def _dictate_code(daemon):
+    return next(iter(next(
+        chord for chord, action in daemon.actions.items() if action == ("dictate", "hold")
+    )))
+
+
+class DeliveryTests(unittest.TestCase):
     def setUp(self):
         self.daemon = Daemon(Config())
         self.daemon.backend = Mock()
@@ -88,46 +108,73 @@ class DaemonRoutingTests(unittest.TestCase):
 
     @patch("voicekey.daemon.notify")
     @patch("voicekey.daemon.inject_mod.copy")
+    @patch("voicekey.daemon.inject_mod.type_text")
     @patch("voicekey.daemon.focus.window_id", return_value=8)
     @patch("voicekey.daemon.time.monotonic", return_value=2.0)
-    def test_focus_change_is_copied(self, _clock, _focus, copy, _notify):
+    def test_focus_change_is_copied(self, _clock, _focus, type_text, copy, _notify):
+        self.daemon._deliver_dictation(_job("dictate", window_id=7), "hello")
+        copy.assert_called_once_with("hello")
+        type_text.assert_not_called()
+
+    @patch("voicekey.daemon.notify")
+    @patch("voicekey.daemon.inject_mod.type_text")
+    @patch("voicekey.daemon.focus.window_id", return_value=7)
+    @patch("voicekey.daemon.time.monotonic", return_value=2.0)
+    def test_same_window_is_typed(self, _clock, _focus, type_text, _notify):
+        self.daemon._deliver_dictation(_job("dictate", window_id=7), "hello")
+        type_text.assert_called_once_with("hello")
+
+    @patch("voicekey.daemon.notify")
+    @patch("voicekey.daemon.inject_mod.copy")
+    @patch("voicekey.daemon.inject_mod.type_text", side_effect=RuntimeError("wtype missing"))
+    @patch("voicekey.daemon.focus.window_id", return_value=7)
+    @patch("voicekey.daemon.time.monotonic", return_value=2.0)
+    def test_typing_failure_copies_instead_of_pasting(self, _clock, _focus, _type, copy, _notify):
         self.daemon._deliver_dictation(_job("dictate", window_id=7), "hello")
         copy.assert_called_once_with("hello")
 
     @patch("voicekey.daemon.notify")
     @patch("voicekey.daemon.inject_mod.copy")
-    @patch("voicekey.daemon.focus.window_id", return_value=None)
-    @patch("voicekey.daemon.time.monotonic", return_value=2.0)
-    def test_unverifiable_focus_is_copied(self, _clock, _focus, copy, _notify):
-        self.daemon._deliver_dictation(_job("dictate"), "hello")
-        copy.assert_called_once_with("hello")
-
-    @patch("voicekey.daemon.notify")
-    @patch("voicekey.daemon.inject_mod.inject", return_value="wtype")
+    @patch("voicekey.daemon.inject_mod.type_text")
     @patch("voicekey.daemon.focus.window_id", return_value=7)
     @patch("voicekey.daemon.time.monotonic", return_value=2.0)
-    def test_same_window_is_typed(self, _clock, _focus, inject, _notify):
+    def test_clipboard_mode_only_copies(self, _clock, _focus, type_text, copy, _notify):
+        self.daemon.cfg.dictation.inject = "clipboard"
         self.daemon._deliver_dictation(_job("dictate", window_id=7), "hello")
-        inject.assert_called_once_with("hello", "wtype")
+        copy.assert_called_once_with("hello")
+        type_text.assert_not_called()
 
     @patch("voicekey.daemon.notify")
-    @patch("voicekey.daemon.inject_mod.inject")
+    @patch("voicekey.daemon.inject_mod.type_text")
+    @patch("voicekey.daemon.focus.window_id", return_value=7)
     @patch("voicekey.daemon.time.monotonic", return_value=2.0)
-    def test_ime_preview_commits_in_place(self, _clock, inject, _notify):
+    def test_ime_preview_commits_in_place(self, _clock, _focus, type_text, _notify):
         ime = FakeIme()
         self.daemon._deliver_dictation(_job("dictate", ImePreview(ime, 1), 7), "hello")
         self.assertEqual(ime.commits, [("hello", 1)])
-        inject.assert_not_called()
+        type_text.assert_not_called()
 
     @patch("voicekey.daemon.notify")
     @patch("voicekey.daemon.inject_mod.copy")
-    @patch("voicekey.daemon.focus.window_id", return_value=8)
+    @patch("voicekey.daemon.inject_mod.type_text")
+    @patch("voicekey.daemon.focus.window_id", return_value=7)
     @patch("voicekey.daemon.time.monotonic", return_value=2.0)
-    def test_lost_ime_field_falls_back_to_focus_guard(self, _clock, _focus, copy, _notify):
+    def test_lost_field_is_copied_never_typed(self, _clock, _focus, type_text, copy, _notify):
         ime = FakeIme()
         ime.commit_result = False
         self.daemon._deliver_dictation(_job("dictate", ImePreview(ime, 1), 7), "hello")
         self.assertEqual(ime.preedits, [("", 1)], "stale preedit is cleared")
+        copy.assert_called_once_with("hello")
+        type_text.assert_not_called()
+
+    @patch("voicekey.daemon.notify")
+    @patch("voicekey.daemon.inject_mod.copy")
+    @patch("voicekey.daemon.focus.window_id", return_value=8)
+    @patch("voicekey.daemon.time.monotonic", return_value=2.0)
+    def test_window_is_checked_before_ime_commit(self, _clock, _focus, copy, _notify):
+        ime = FakeIme()
+        self.daemon._deliver_dictation(_job("dictate", ImePreview(ime, 1), 7), "hello")
+        self.assertEqual(ime.commits, [])
         copy.assert_called_once_with("hello")
 
     @patch("voicekey.daemon.notify")
@@ -146,33 +193,34 @@ class DaemonRoutingTests(unittest.TestCase):
         self.assertEqual(ime.preedits, [("", 1)])
         self.assertTrue(self.daemon.agent_prompts.empty())
 
-
-class BindingsTests(unittest.TestCase):
-    def test_bindings_describe_configured_keys(self):
-        daemon = Daemon(Config(dictate_toggle_key="KEY_CONFIG"))
-        self.assertEqual(daemon.bindings(), [
-            "KEY_F9=dictate(hold)", "KEY_F10=agent(hold)", "KEY_CONFIG=dictate(toggle)",
-        ])
+    @patch("voicekey.daemon.notify")
+    @patch("voicekey.daemon.recovery.keep", side_effect=OSError("disk full"))
+    @patch("voicekey.daemon.inject_mod.type_text")
+    @patch("voicekey.daemon.focus.window_id", return_value=7)
+    @patch("voicekey.daemon.time.monotonic", return_value=2.0)
+    def test_recording_log_failure_does_not_lose_text(self, _clock, _focus, type_text, _keep, _notify):
+        self.daemon.cfg.recordings_dir = "/nowhere"
+        self.daemon._process(_job("dictate", window_id=7))
+        type_text.assert_called_once_with("hello")
 
 
 class SessionTests(unittest.TestCase):
     @patch("voicekey.daemon.notify")
     @patch("voicekey.daemon.focus.window_id", return_value=7)
-    def test_live_text_goes_to_the_active_field(self, _focus, _notify):
+    def test_field_is_bound_at_key_down_and_live_text_goes_there(self, _focus, _notify):
         daemon = Daemon(Config())
         daemon.recorder = FakeRecorder()
-        daemon.ime = FakeIme(generation=3)
+        daemon.ime = FakeIme(generation=3, activation_delay_calls=2)
         daemon.streaming = Mock()
         daemon.streaming.session.return_value = FakeStream(["hel", "hello", "hello there"])
-        code = next(iter(next(
-            chord for chord, action in daemon.actions.items() if action == ("dictate", "hold")
-        )))
+        code = _dictate_code(daemon)
 
         daemon._on_key("/dev/input/event3", code, 1)
-        self.assertIs(daemon.session.ime, daemon.ime)
-        daemon.recorder.on_frame(np.zeros(1600, dtype=np.float32))
+        self.assertEqual(daemon.ime.rebinds, 1)
         self.assertIsInstance(daemon.session.preview, ImePreview)
-        daemon.recorder.on_frame(np.zeros(1600, dtype=np.float32))
+        self.assertEqual(daemon.session.preview.generation, 3)
+        daemon.recorder.on_frame(FRAME)
+        daemon.recorder.on_frame(FRAME)
         daemon._on_key("/dev/input/event3", code, 0)
 
         self.assertEqual(daemon.ime.preedits, [("hel", 3), ("hello", 3), ("hello there", 3)])
@@ -182,16 +230,30 @@ class SessionTests(unittest.TestCase):
 
     @patch("voicekey.daemon.notify")
     @patch("voicekey.daemon.focus.window_id", return_value=7)
-    def test_agent_and_inactive_ime_preview_in_notifications(self, _focus, _notify):
+    def test_no_rebind_while_previous_text_is_landing(self, _focus, _notify):
+        daemon = Daemon(Config())
+        daemon.recorder = FakeRecorder()
+        daemon.ime = FakeIme(generation=5)
+        daemon.jobs.put_nowait(_job("dictate"))  # still being transcribed
+        daemon._start("/dev/input/event3", frozenset(), "hold", "dictate", "release")
+        self.assertEqual(daemon.ime.rebinds, 0)
+        self.assertEqual(daemon.session.preview.generation, 5)
+
+    @patch("voicekey.daemon.notify")
+    @patch("voicekey.daemon.focus.window_id", return_value=7)
+    def test_agent_and_inactive_field_preview_in_notifications(self, _focus, _notify):
         daemon = Daemon(Config())
         daemon.recorder = FakeRecorder()
         daemon.ime = FakeIme(generation=None)
-        daemon._start("/dev/input/event3", frozenset(), "hold", "dictate", "release")
+        with patch.object(daemon_mod, "ACTIVATION_WAIT", 0.01):
+            daemon._start("/dev/input/event3", frozenset(), "hold", "dictate", "release")
         self.assertIsInstance(daemon.session.preview, NotifyPreview)
         daemon._finish()
+        daemon.jobs.get_nowait()
         daemon.ime = FakeIme(generation=1)
         daemon._start("/dev/input/event3", frozenset(), "hold", "agent", "release")
         self.assertIsInstance(daemon.session.preview, NotifyPreview)
+        self.assertEqual(daemon.ime.rebinds, 0)
 
     @patch("voicekey.daemon.notify")
     @patch("voicekey.daemon.focus.window_id", return_value=None)
@@ -201,6 +263,40 @@ class SessionTests(unittest.TestCase):
         daemon.ime = FakeIme(generation=1)  # e.g. a lock screen's password field
         daemon._start("/dev/input/event3", frozenset(), "hold", "dictate", "release")
         self.assertIsInstance(daemon.session.preview, NotifyPreview)
+        self.assertEqual(daemon.ime.rebinds, 0)
+
+    @patch("voicekey.daemon.notify")
+    @patch("voicekey.daemon.focus.window_id", return_value=7)
+    def test_live_recognizer_failure_keeps_the_recording(self, _focus, _notify):
+        daemon = Daemon(Config())
+        daemon.recorder = FakeRecorder()
+        daemon.streaming = Mock()
+        daemon.streaming.session.return_value = FakeStream([], fail=True)
+        code = _dictate_code(daemon)
+        daemon._on_key("/dev/input/event3", code, 1)
+        session = daemon.session
+        daemon.recorder.on_frame(FRAME)
+        daemon._on_key("/dev/input/event3", code, 0)
+        self.assertFalse(session.live)
+        self.assertEqual(daemon.jobs.get_nowait().live_text, "")
+
+    def test_slow_live_recognizer_drops_only_the_preview(self):
+        release = threading.Event()
+
+        class SlowStream:
+            def feed(self, frame):
+                release.wait(5)
+                return "x"
+
+            def finish(self):
+                return "x"
+
+        session = Session("dictate", "hold", frozenset(), "dev", 7, SlowStream())
+        for _ in range(daemon_mod.OVERLOAD_FRAMES + 2):
+            session.feed(FRAME)
+        self.assertFalse(session.live)
+        release.set()
+        session.finish()  # must not block or raise
 
     @patch("voicekey.daemon.notify")
     @patch("voicekey.daemon.focus.window_id", return_value=7)
@@ -226,9 +322,7 @@ class SessionTests(unittest.TestCase):
     def test_hold_key_starts_on_press_and_stops_on_release(self, _focus, _notify):
         daemon = Daemon(Config())
         daemon.recorder = FakeRecorder()
-        code = next(iter(next(
-            chord for chord, action in daemon.actions.items() if action == ("dictate", "hold")
-        )))
+        code = _dictate_code(daemon)
 
         daemon._on_key("/dev/input/event3", code, 1)
         self.assertTrue(daemon.recorder.active)
@@ -270,6 +364,14 @@ class SessionTests(unittest.TestCase):
         daemon._on_tick()
         self.assertIsNone(daemon.session)
         self.assertEqual(daemon.ime.preedits, [("", 1)])
+
+
+class BindingsTests(unittest.TestCase):
+    def test_bindings_describe_configured_keys(self):
+        daemon = Daemon(Config(dictate_toggle_key="KEY_CONFIG"))
+        self.assertEqual(daemon.bindings(), [
+            "KEY_F9=dictate(hold)", "KEY_F10=agent(hold)", "KEY_CONFIG=dictate(toggle)",
+        ])
 
 
 if __name__ == "__main__":

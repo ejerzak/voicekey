@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 import sys
@@ -116,14 +117,17 @@ class ModelDownloadTests(unittest.TestCase):
                 archive.addfile(info, io.BytesIO(content))
         return output.getvalue()
 
-    def test_downloads_extracts_and_then_skips_complete_model(self):
-        model_name = "sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25"
-        self.assertIn(model_name, MODELS)
+    MODEL = "sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25"
+    FAKE_DIGESTS = {MODEL: {name: hashlib.sha256(name.encode()).hexdigest() for name in MODEL_FILES}}
+
+    def test_downloads_verifies_extracts_and_then_skips_complete_model(self):
+        self.assertIn(self.MODEL, MODELS)
         with tempfile.TemporaryDirectory() as directory:
-            model_dir = Path(directory) / model_name
-            response = io.BytesIO(self._archive(model_name))
+            model_dir = Path(directory) / self.MODEL
+            response = io.BytesIO(self._archive(self.MODEL))
             response.headers = {"Content-Length": str(len(response.getvalue()))}
-            with patch("voicekey.backends.urllib.request.urlopen", return_value=response):
+            with patch("voicekey.backends.urllib.request.urlopen", return_value=response), \
+                    patch("voicekey.backends.MODELS", self.FAKE_DIGESTS):
                 ensure_model(str(model_dir))
             for name in MODEL_FILES:
                 self.assertTrue((model_dir / name).is_file())
@@ -132,6 +136,16 @@ class ModelDownloadTests(unittest.TestCase):
                 side_effect=AssertionError("complete model should not be downloaded"),
             ):
                 ensure_model(str(model_dir))
+
+    def test_checksum_mismatch_rejects_the_download(self):
+        with tempfile.TemporaryDirectory() as directory:
+            model_dir = Path(directory) / self.MODEL
+            response = io.BytesIO(self._archive(self.MODEL))
+            response.headers = {}
+            with patch("voicekey.backends.urllib.request.urlopen", return_value=response):
+                with self.assertRaisesRegex(BackendUnavailable, "checksum mismatch"):
+                    ensure_model(str(model_dir))  # real digests, fake content
+            self.assertFalse(model_dir.exists())
 
     def test_unknown_model_is_rejected_before_any_download(self):
         with tempfile.TemporaryDirectory() as directory:
