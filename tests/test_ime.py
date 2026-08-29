@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -140,6 +142,31 @@ class FailureTests(unittest.TestCase):
         queued = ime._commands.get_nowait()
         queued()  # the loop thread catching up later must be a no-op
         self.assertEqual(ran, [])
+
+    def test_a_call_already_running_at_timeout_is_awaited(self):
+        ime = _offline_input_method()
+        started = threading.Event()
+        release = threading.Event()
+
+        def operation():
+            started.set()
+            release.wait(5)
+            return True
+
+        def loop_thread():  # runs whatever gets posted, like the real loop
+            ime._commands.get(timeout=2)()
+
+        def release_later():
+            started.wait(2)
+            time.sleep(0.15)
+            release.set()
+
+        threading.Thread(target=loop_thread, daemon=True).start()
+        threading.Thread(target=release_later, daemon=True).start()
+        with patch.object(ime_mod, "CALL_TIMEOUT", 0.02):
+            began = time.monotonic()
+            self.assertTrue(ime._call(operation), "a started call reports its real result")
+        self.assertGreaterEqual(time.monotonic() - began, 0.15)
 
     def test_dead_connection_turns_everything_off(self):
         ime = _offline_input_method()

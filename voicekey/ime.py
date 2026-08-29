@@ -133,18 +133,24 @@ class InputMethod:
         return self._call(lambda: self._apply(generation, commit=text))
 
     def _call(self, function) -> bool:
-        """Run FUNCTION on the loop thread and wait for its result. A call
-        that times out is cancelled, so it cannot fire later — after the
-        caller has already delivered the text another way."""
+        """Run FUNCTION on the loop thread and wait for its result.
+
+        A call still pending when the timeout expires is cancelled, so it
+        cannot fire later — after the caller has delivered the text another
+        way. A call that has already started cannot be cancelled; then the
+        caller waits for its real result, since text may have landed."""
         if self._dead:
             return False
+        lock = threading.Lock()
+        state = {"started": False, "cancelled": False}
         done = threading.Event()
-        cancelled = threading.Event()
         result = []
 
         def run():
-            if cancelled.is_set():
-                return
+            with lock:
+                if state["cancelled"]:
+                    return
+                state["started"] = True
             try:
                 result.append(bool(function()))
             finally:
@@ -152,8 +158,12 @@ class InputMethod:
 
         self._post(run)
         if not done.wait(CALL_TIMEOUT):
-            cancelled.set()
-            log.warning("the input method did not respond within %.0fs", CALL_TIMEOUT)
+            with lock:
+                if not state["started"]:
+                    state["cancelled"] = True
+                    log.warning("the input method did not respond within %.0fs", CALL_TIMEOUT)
+                    return False
+            done.wait(30.0)
         return bool(result and result[0])
 
     def close(self) -> None:

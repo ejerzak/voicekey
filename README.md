@@ -14,9 +14,9 @@ transcript. Everything runs locally on the CPU; nothing leaves the machine.
   lands comes from an offline model with full context and proper
   punctuation.
 - **Never in the wrong place.** Text goes only into the field that was
-  active when the key went down. If that field is gone by the time the
-  final pass lands, the transcript is copied to the clipboard and a
-  notification says so.
+  active when the key went down (captured within a few milliseconds of
+  the press). If that field is gone by the time the final pass lands, the
+  transcript is copied to the clipboard and a notification says so.
 - **Optional agent key.** A second key sends the transcript to a persistent
   [Hermes](https://hermes-agent.nousresearch.com) agent session instead.
 

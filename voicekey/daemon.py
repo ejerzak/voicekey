@@ -80,16 +80,17 @@ class NotifyPreview:
 
     def __init__(self, action: str) -> None:
         self.action = action
+        self.closed = False
         self._last = 0.0
 
     def update(self, text: str) -> None:
         now = time.monotonic()
-        if now - self._last >= PREVIEW_INTERVAL:
+        if not self.closed and now - self._last >= PREVIEW_INTERVAL:
             self._last = now
             notify(f"● {LABEL[self.action]}", text, ms=60000, channel=self.action)
 
     def clear(self) -> None:
-        pass  # the next status notification replaces it
+        self.closed = True  # the next status notification replaces it
 
 
 class ImePreview:
@@ -102,14 +103,18 @@ class ImePreview:
         self.ime = ime
         self.generation = generation
         self.prefix = prefix
+        self.closed = False  # after clear/commit, no partial may reappear
 
     def update(self, text: str) -> None:
-        self.ime.preedit(spaced(self.prefix, text), self.generation)
+        if not self.closed:
+            self.ime.preedit(spaced(self.prefix, text), self.generation)
 
     def clear(self) -> None:
+        self.closed = True
         self.ime.preedit("", self.generation)
 
     def commit(self, text: str) -> bool:
+        self.closed = True
         return self.ime.commit(spaced(self.prefix, text), self.generation)
 
 
@@ -128,27 +133,35 @@ class Session:
     recognizer can only lose the preview, never microphone audio."""
 
     def __init__(self, action: str, behavior: str, chord: frozenset[int],
-                 device: str, window_id: int | None, stream) -> None:
+                 device: str) -> None:
         self.action = action
         self.behavior = behavior
         self.chord = chord
         self.device = device
-        self.window_id = window_id
+        self.window_id: int | None = None
         self.preview: NotifyPreview | ImePreview = NotifyPreview(action)
         self.prefix = ""  # space owed before this dictation; see Daemon._spacing
         self.text = ""
-        self._stream = stream
+        self.decoder: threading.Thread | None = None
+        self._stream = None
+        self._lock = threading.Lock()
         self._frames: queue.Queue = queue.Queue(maxsize=OVERLOAD_FRAMES)
-        self._decoder: threading.Thread | None = None
-        if stream is not None:
-            self._decoder = threading.Thread(
-                target=self._decode, name="live-decode", daemon=True
-            )
-            self._decoder.start()
+
+    def attach(self, stream) -> None:
+        """Start live recognition. Frames that arrived earlier reach only
+        the final pass, which keeps all of them anyway."""
+        self._stream = stream
+        self.decoder = threading.Thread(target=self._decode, name="live-decode", daemon=True)
+        self.decoder.start()
 
     @property
     def live(self) -> bool:
         return self._stream is not None
+
+    @property
+    def stuck(self) -> bool:
+        """The decode thread outlived the session (native inference hung)."""
+        return self.decoder is not None and self.decoder.is_alive()
 
     def feed(self, frame: np.ndarray) -> None:  # recorder thread; never blocks
         if self._stream is None:
@@ -164,11 +177,12 @@ class Session:
             if stream is None:
                 return
             try:
-                self._show(stream.feed(frame))
+                text = stream.feed(frame)
             except Exception:
                 log.exception("live recognition failed; preview off for this recording")
                 self._stream = None
                 return
+            self._show(stream, text)
 
     def finish(self) -> None:
         """Flush the live recognizer; returns once its text is final."""
@@ -180,18 +194,21 @@ class Session:
         except queue.Full:
             self._drop("live recognition fell behind at release")
             return
-        self._decoder.join(3.0)
-        if self._decoder.is_alive() or self._stream is None:
+        self.decoder.join(3.0)
+        if self.decoder.is_alive():
             self._drop("live recognition did not finish in time")
             return
+        if self._stream is None:
+            return  # it failed and said so
         try:
-            self._show(stream.finish())
+            self._show(stream, stream.finish())
         except Exception:
             log.exception("live recognition failed at release")
             self._stream = None
 
     def cancel(self) -> None:
-        self._stream = None
+        with self._lock:
+            self._stream = None
         try:
             self._frames.put_nowait(None)
         except queue.Full:
@@ -201,10 +218,13 @@ class Session:
         log.warning(reason)
         self.cancel()
 
-    def _show(self, text: str) -> None:
-        if text and text != self.text:
-            self.text = text
-            self.preview.update(text)
+    def _show(self, stream, text: str) -> None:
+        with self._lock:
+            if self._stream is not stream:
+                return  # cancelled while decoding: this partial is stale
+            if text and text != self.text:
+                self.text = text
+                self.preview.update(text)
 
 
 @dataclass(frozen=True)
@@ -241,6 +261,9 @@ class Daemon:
         # Window that received the last inserted dictation, when that text did
         # not end in whitespace: the next dictation there is owed a space.
         self._continuing: int | None = None
+        # A decode thread that never came back; the recognizer is not
+        # provably safe to share with it, so no live preview until it exits.
+        self._stuck: threading.Thread | None = None
 
     def load(self) -> None:
         """Load both models and register as the input method; each failure
@@ -266,6 +289,8 @@ class Daemon:
                 self.ime = InputMethod()
             except ImeUnavailable as exc:
                 log.info("no in-field preview: %s", exc)
+            except Exception:
+                log.exception("input method failed to start; previews use notifications")
 
     def start_workers(self) -> None:
         for name, target in (("transcription", self._transcription_worker),
@@ -351,33 +376,44 @@ class Daemon:
 
     def _start(self, device: str, chord: frozenset[int], behavior: str,
                action: str, stop_instruction: str) -> None:
-        window_id = (
-            focus.window_id()
-            if action == "dictate" and self.cfg.dictation.require_same_window
-            else None
-        )
-        stream = self.streaming.session() if self.streaming else None
-        session = Session(action, behavior, chord, device, window_id, stream)
+        session = Session(action, behavior, chord, device)
         try:
-            self.recorder.start(session.feed)  # capture first; the field can wait
+            self.recorder.start(session.feed)  # capture first; everything else can wait
         except OSError as exc:
-            session.cancel()
             notify("voicekey: recording failed", str(exc), error=True)
             return
         self.session = session
+        try:
+            self._prepare(session)
+        except Exception as exc:  # the recording and its final pass survive
+            log.exception("could not set up the live preview")
+            session.cancel()
+            notify("voicekey: live preview unavailable", f"{type(exc).__name__}: {exc}", error=True)
+        log.info("%s: %s preview", action,
+                 "in-field" if isinstance(session.preview, ImePreview) else "notification")
+        notify(f"● Recording ({LABEL[action]})", stop_instruction, ms=60000, channel=action)
+
+    def _prepare(self, session: Session) -> None:
+        """Attach the live recognizer and bind the field, milliseconds after
+        key-down; text will go only to the field active now."""
+        dictate = session.action == "dictate"
+        if dictate and self.cfg.dictation.require_same_window:
+            session.window_id = focus.window_id()
+        if self.streaming is not None:
+            if self._stuck is not None and self._stuck.is_alive():
+                log.warning("a previous live decoder is still running; no preview")
+            else:
+                session.attach(self.streaming.session())
         # In-field text needs a real focused window: a lock screen or launcher
         # can activate the input method too, and text must never land there.
-        if (action == "dictate" and self.ime is not None
-                and (window_id is not None or not self.cfg.dictation.require_same_window)):
+        if (dictate and self.ime is not None
+                and (session.window_id is not None or not self.cfg.dictation.require_same_window)):
             generation = self._bind_field()
             if generation is not None:
                 session.preview = ImePreview(self.ime, generation)
         session.prefix = self._spacing(session)
         if isinstance(session.preview, ImePreview):
             session.preview.prefix = session.prefix
-        log.info("%s: %s preview", action,
-                 "in-field" if isinstance(session.preview, ImePreview) else "notification")
-        notify(f"● Recording ({LABEL[action]})", stop_instruction, ms=60000, channel=action)
 
     def _bind_field(self) -> int | None:
         """Generation of the field active right now, or None.
@@ -418,6 +454,7 @@ class Daemon:
             notify("voicekey", "cancelled (tap)", ms=1000, channel=session.action)
             return
         session.finish()
+        self._note_stuck(session)
         job = Job(samples, session.action, time.monotonic(), session.window_id,
                   session.preview, session.text, session.prefix)
         try:
@@ -430,9 +467,14 @@ class Daemon:
     def _abort(self, message: str) -> None:
         session, self.session = self.session, None
         session.cancel()
+        self._note_stuck(session)
         self.recorder.abort()
         session.preview.clear()
         notify("voicekey", message, error=True)
+
+    def _note_stuck(self, session: Session) -> None:
+        if session.stuck:
+            self._stuck = session.decoder
 
     def _on_device_lost(self, device: str) -> None:
         self.pressed.pop(device, None)

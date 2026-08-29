@@ -294,12 +294,77 @@ class SessionTests(unittest.TestCase):
             def finish(self):
                 return "x"
 
-        session = Session("dictate", "hold", frozenset(), "dev", 7, SlowStream())
+        session = Session("dictate", "hold", frozenset(), "dev")
+        session.attach(SlowStream())
         for _ in range(daemon_mod.OVERLOAD_FRAMES + 2):
             session.feed(FRAME)
         self.assertFalse(session.live)
         release.set()
         session.finish()  # must not block or raise
+
+    def test_partial_decoded_during_cancel_is_discarded(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        class SlowStream:
+            def feed(self, frame):
+                started.set()
+                release.wait(5)
+                return "late partial"
+
+            def finish(self):
+                return "late partial"
+
+        session = Session("dictate", "hold", frozenset(), "dev")
+        ime = FakeIme()
+        session.preview = ImePreview(ime, 1)
+        session.attach(SlowStream())
+        session.feed(FRAME)
+        self.assertTrue(started.wait(2))
+        session.cancel()          # e.g. the release timed out and the final text was committed
+        session.preview.clear()
+        release.set()
+        session.decoder.join(2)
+        self.assertEqual(ime.preedits, [("", 1)], "no partial after the clear")
+
+    @patch("voicekey.daemon.notify")
+    def test_previews_ignore_updates_after_commit_or_clear(self, notify):
+        ime = FakeIme()
+        preview = ImePreview(ime, 1)
+        preview.commit("final")
+        preview.update("late")
+        self.assertEqual(ime.preedits, [])
+        shown = NotifyPreview("dictate")
+        shown.clear()
+        shown.update("late")
+        notify.assert_not_called()
+
+    @patch("voicekey.daemon.notify")
+    @patch("voicekey.daemon.focus.window_id", return_value=7)
+    def test_stuck_decoder_disables_the_preview_until_it_exits(self, _focus, _notify):
+        daemon = Daemon(Config())
+        daemon.recorder = FakeRecorder()
+        daemon.streaming = Mock()
+        hang = threading.Event()
+        daemon._stuck = threading.Thread(target=hang.wait, daemon=True)
+        daemon._stuck.start()
+        daemon._start("/dev/input/event3", frozenset(), "hold", "dictate", "release")
+        daemon.streaming.session.assert_not_called()
+        self.assertFalse(daemon.session.live)
+        hang.set()
+
+    @patch("voicekey.daemon.notify")
+    @patch("voicekey.daemon.focus.window_id", return_value=7)
+    def test_preview_setup_failure_keeps_the_recording(self, _focus, _notify):
+        daemon = Daemon(Config())
+        daemon.recorder = FakeRecorder()
+        daemon.streaming = Mock()
+        daemon.streaming.session.side_effect = RuntimeError("no stream for you")
+        daemon._start("/dev/input/event3", frozenset(), "hold", "dictate", "release")
+        self.assertTrue(daemon.recorder.active)
+        self.assertIsInstance(daemon.session.preview, NotifyPreview)
+        daemon._finish()
+        self.assertEqual(daemon.jobs.get_nowait().action, "dictate")
 
     @patch("voicekey.daemon.notify")
     @patch("voicekey.daemon.focus.window_id", return_value=7)
