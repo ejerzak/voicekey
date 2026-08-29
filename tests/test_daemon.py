@@ -512,6 +512,9 @@ class SpacingIntegrationTests(unittest.TestCase):
         daemon.recorder = FakeRecorder()
         daemon.ime = FakeIme(generation=1)
         daemon.ime.before_cursor = lambda: before
+        self._probe = patch("voicekey.daemon.emacs_mod.before_cursor", return_value=before)
+        self._probe.start()
+        self.addCleanup(self._probe.stop)
         if landing is not None:
             daemon.spacing.queued(landing)
         if queued:
@@ -560,6 +563,32 @@ class SpacingIntegrationTests(unittest.TestCase):
             threading.Thread(target=daemon._transcription_worker, daemon=True).start()
             daemon.jobs.join()
         self.assertFalse(daemon.spacing.landing_in(7))
+
+    @patch("voicekey.daemon.notify")
+    @patch("voicekey.daemon.emacs_mod.insert")
+    @patch("voicekey.daemon.focus.window_id", return_value=7)
+    @patch("voicekey.daemon.time.monotonic", return_value=2.0)
+    def test_emacs_gets_the_text_through_emacsclient_not_the_ime(self, _clock, _focus, insert, _notify):
+        daemon = Daemon(Config())
+        daemon.spacing.inserted(7, "First.", daemon.spacing.mark())
+        ime = FakeIme()
+        job = Job(np.zeros(1), "dictate", 1.0, 7, ImePreview(ime, 1), "live", "emacs", ".", False)
+        daemon._deliver_dictation(job, "Second.")
+        insert.assert_called_once_with(" Second.")
+        self.assertEqual(ime.commits, [])
+        self.assertEqual(ime.preedits, [("", 1)], "the preedit is cleared first")
+
+    @patch("voicekey.daemon.notify")
+    @patch("voicekey.daemon.inject_mod.copy")
+    @patch("voicekey.daemon.emacs_mod.insert", side_effect=daemon_mod.emacs_mod.EmacsError("buffer is read-only"))
+    @patch("voicekey.daemon.focus.window_id", return_value=7)
+    @patch("voicekey.daemon.time.monotonic", return_value=2.0)
+    def test_emacs_refusal_copies_with_the_reason(self, _clock, _focus, _insert, copy, notify):
+        daemon = Daemon(Config())
+        job = Job(np.zeros(1), "dictate", 1.0, 7, ImePreview(FakeIme(), 1), "live", "emacs", None, False)
+        daemon._deliver_dictation(job, "Hello.")
+        copy.assert_called_once_with("Hello.")
+        self.assertIn("read-only", notify.call_args.args[1])
 
     @patch("voicekey.daemon.notify")
     @patch("voicekey.daemon.inject_mod.copy")

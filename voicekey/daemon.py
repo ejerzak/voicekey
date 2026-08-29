@@ -26,6 +26,7 @@ import numpy as np
 from evdev import ecodes
 
 from . import agent as agent_mod
+from . import emacs as emacs_mod
 from . import focus
 from . import inject as inject_mod
 from . import recovery
@@ -484,6 +485,8 @@ class Daemon:
             session.preview = ImePreview(self.ime, generation)
             if not session.after_landing:  # else stale: the landing text changes it
                 session.before = self.ime.before_cursor()
+        if dictate and session.app_id == "emacs" and not session.after_landing:
+            session.before = emacs_mod.before_cursor()  # exact; Emacs tells the IME nothing
         if self.streaming is not None:
             if self._stuck is not None and self._stuck.is_alive():
                 log.warning("a previous live decoder is still running; no preview")
@@ -616,6 +619,22 @@ class Daemon:
             return
         prefix = self.spacing.settle(job)
         mark = self.spacing.mark()
+        if job.app_id == "emacs":
+            # Through Emacs itself, with the gesture of its current state, so
+            # dictation never becomes commands in normal or visual state.
+            if not self._same_window(job):
+                job.preview.clear()
+                self._copy_instead(text, "focus changed; copied instead of typing")
+                return
+            job.preview.clear()
+            try:
+                emacs_mod.insert(spaced(prefix, text))
+            except emacs_mod.EmacsError as exc:
+                self._copy_instead(text, f"Emacs: {exc}; copied instead")
+                return
+            log.info("inserted via emacsclient")
+            self._inserted(job, text, mark)
+            return
         if isinstance(job.preview, ImePreview):
             job.preview.prefix = prefix
             try:

@@ -92,6 +92,16 @@ experience; anything else gets the preview in a notification and the final
 text through `wtype`. Because there is one input method per seat, voicekey
 cannot coexist with an IME such as fcitx — set `ime = false` to keep one.
 
+Emacs is a special case: committed text reaches an evil-mode buffer as
+keystrokes, so in normal or visual state it would become commands. When
+the focused window is Emacs, voicekey therefore inserts through
+`emacsclient` with the gesture of the current state — at point in insert
+state, after the cursor in normal state (`a`), in place of the selection in
+visual state (`c`), to the process in a terminal buffer — and refuses
+read-only buffers, blockwise selections and a pending operator by copying
+instead. The live preview is still the preedit; Emacs also reports the
+character before point, so spacing there is exact.
+
 Spacing between dictations is automatic: a dictation that continues text
 gets a leading space, one that starts a line or follows an opening bracket
 does not. The character before the cursor decides when the application
