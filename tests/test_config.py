@@ -26,37 +26,29 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.agent.tmux_session, "voicekey-hermes")
         self.assertTrue(os.path.isabs(cfg.agent.working_directory))
 
-    def test_desktop_host_keeps_hold_keys_without_toggle_keys(self):
-        path = os.path.join(
-            os.path.dirname(__file__), "..", "hosts", "desktop.toml"
-        )
-        cfg = load(path)
+    def test_defaults_enable_live_preview_and_in_field_text(self):
+        cfg = self._load_text("")
         self.assertEqual(cfg.backend.type, "parakeet")
         self.assertTrue(cfg.backend.model_dir.endswith(
             "/sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-non-streaming"
         ))
-        self.assertEqual(cfg.dictate_key, "KEY_F9")
-        self.assertEqual(cfg.agent_key, "KEY_F10")
-        self.assertEqual(cfg.dictate_toggle_key, "")
-        self.assertEqual(cfg.agent_toggle_key, "")
-        self.assertEqual(cfg.agent.transport, "local")
+        self.assertTrue(cfg.streaming.model_dir.endswith("-560ms-int8-2026-04-25"))
+        self.assertTrue(os.path.isabs(cfg.streaming.model_dir))
+        self.assertTrue(cfg.dictation.ime)
+        self.assertEqual(cfg.recordings_dir, "")
 
-    def test_laptop_uses_remote_desktop_hermes(self):
-        path = os.path.join(
-            os.path.dirname(__file__), "..", "hosts", "laptop.toml"
+    def test_preview_can_be_disabled_and_recordings_kept(self):
+        cfg = self._load_text(
+            'recordings_dir = "~/voicekey-samples"\n'
+            '[streaming]\nmodel_dir = ""\n[dictation]\nime = false\n'
         )
-        cfg = load(path)
-        self.assertEqual(cfg.dictate_key, "KEY_F23")
-        self.assertEqual(cfg.agent_key, "KEY_RIGHTALT+KEY_F23")
-        self.assertEqual(cfg.dictate_toggle_key, "")
-        self.assertEqual(cfg.agent_toggle_key, "")
-        self.assertTrue(cfg.backend.model_dir.endswith(
-            "/sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-non-streaming"
-        ))
-        self.assertEqual(cfg.agent.transport, "ssh-over-tailscale")
-        self.assertEqual(cfg.agent.remote_host, "desktop")
-        self.assertEqual(cfg.agent.remote_user, "alice")
-        self.assertTrue(cfg.agent.identity_file.endswith("/.ssh/id_ed25519"))
+        self.assertEqual(cfg.streaming.model_dir, "")
+        self.assertFalse(cfg.dictation.ime)
+        self.assertEqual(cfg.recordings_dir, os.path.expanduser("~/voicekey-samples"))
+
+    def test_removed_remote_backend_is_rejected(self):
+        with self.assertRaisesRegex(ConfigError, "backend.type must be one of"):
+            self._load_text('[backend]\ntype = "remote"\n')
 
     def test_remote_transport_requires_host_and_user(self):
         with self.assertRaisesRegex(ConfigError, "agent.remote_host"):

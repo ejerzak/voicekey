@@ -10,7 +10,8 @@ from dataclasses import dataclass, field, fields
 from typing import Any
 
 DEFAULT_PATH = os.path.expanduser("~/.config/voicekey/config.toml")
-BACKEND_TYPES = {"faster-whisper", "parakeet", "remote"}
+MODELS_DIR = "~/.local/share/voicekey"
+BACKEND_TYPES = {"faster-whisper", "parakeet"}
 AGENT_TARGETS = {"hermes"}
 AGENT_TRANSPORTS = {"local", "ssh-over-tailscale"}
 TMUX_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,48}$")
@@ -36,16 +37,30 @@ def key_chord_names(value: str) -> tuple[str, ...]:
 
 @dataclass
 class BackendConfig:
-    type: str = "faster-whisper"
+    """Offline model for the final pass."""
+
+    type: str = "parakeet"
+    model_dir: str = (
+        f"{MODELS_DIR}/sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-non-streaming"
+    )
+    # faster-whisper only
     model: str = "large-v3-turbo"
     device: str = "auto"
     compute_type: str = "default"
-    model_dir: str = ""
-    url: str = ""
+
+
+@dataclass
+class StreamingConfig:
+    """Streaming model for the live preview; an empty model_dir disables it."""
+
+    model_dir: str = (
+        f"{MODELS_DIR}/sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25"
+    )
 
 
 @dataclass
 class DictationConfig:
+    ime: bool = True
     inject: str = "wtype"
     max_delay_seconds: float = 10.0
     require_same_window: bool = True
@@ -79,7 +94,9 @@ class Config:
     language: str = "en"
     min_seconds: float = 0.3
     max_seconds: float = 90.0
+    recordings_dir: str = ""
     backend: BackendConfig = field(default_factory=BackendConfig)
+    streaming: StreamingConfig = field(default_factory=StreamingConfig)
     dictation: DictationConfig = field(default_factory=DictationConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
 
@@ -104,6 +121,11 @@ def _string(name: str, value: Any, *, allow_empty: bool = False) -> str:
         qualifier = "a string" if allow_empty else "a non-empty string"
         raise ConfigError(f"{name} must be {qualifier}")
     return value
+
+
+def _path(name: str, value: Any) -> str:
+    value = _string(name, value, allow_empty=True)
+    return os.path.abspath(os.path.expanduser(value)) if value else ""
 
 
 def _number(name: str, value: Any, *, minimum: float = 0.0) -> float:
@@ -135,6 +157,7 @@ def _validate(cfg: Config) -> None:
     cfg.max_seconds = _number("max_seconds", cfg.max_seconds, minimum=0.1)
     if cfg.min_seconds >= cfg.max_seconds:
         raise ConfigError("min_seconds must be less than max_seconds")
+    cfg.recordings_dir = _path("recordings_dir", cfg.recordings_dir)
     configured_keys = [
         frozenset(key_chord_names(key))
         for key in (
@@ -154,13 +177,16 @@ def _validate(cfg: Config) -> None:
             f"backend.type must be one of {', '.join(sorted(BACKEND_TYPES))}, "
             f"got {cfg.backend.type!r}"
         )
-    for name in ("model", "device", "compute_type", "model_dir", "url"):
+    cfg.backend.model_dir = _path("backend.model_dir", cfg.backend.model_dir)
+    for name in ("model", "device", "compute_type"):
         setattr(
             cfg.backend,
             name,
             _string(f"backend.{name}", getattr(cfg.backend, name), allow_empty=True),
         )
+    cfg.streaming.model_dir = _path("streaming.model_dir", cfg.streaming.model_dir)
 
+    cfg.dictation.ime = _boolean("dictation.ime", cfg.dictation.ime)
     cfg.dictation.inject = _string("dictation.inject", cfg.dictation.inject)
     if cfg.dictation.inject not in ("wtype", "clipboard"):
         raise ConfigError(
@@ -259,8 +285,7 @@ def load(path: str | None = None) -> Config:
             data = tomllib.load(handle)
     except FileNotFoundError:
         raise ConfigError(
-            f"no config at {path} — run install step 07-voicekey, or copy "
-            "apps/voicekey/config.example.toml there"
+            f"no config at {path} — run install.sh, or copy config.example.toml there"
         )
     except PermissionError as exc:
         raise ConfigError(f"cannot read config {path}: {exc}")
@@ -271,12 +296,13 @@ def load(path: str | None = None) -> Config:
 
     if not isinstance(data, dict):
         raise ConfigError("config root must be a TOML table")
-    backend = _table(data, "backend")
-    dictation = _table(data, "dictation")
-    agent = _table(data, "agent")
-    _apply(cfg.backend, backend, "backend.")
-    _apply(cfg.dictation, dictation, "dictation.")
-    _apply(cfg.agent, agent, "agent.")
+    for section, target in (
+        ("backend", cfg.backend),
+        ("streaming", cfg.streaming),
+        ("dictation", cfg.dictation),
+        ("agent", cfg.agent),
+    ):
+        _apply(target, _table(data, section), f"{section}.")
     _apply(cfg, data, "")
     _validate(cfg)
     return cfg

@@ -1,40 +1,42 @@
-# voicekey config — per-host. Real configs live in apps/voicekey/hosts/<hostname>.toml
-# and are symlinked to ~/.config/voicekey/config.toml by install step 07.
+# voicekey config — ~/.config/voicekey/config.toml
+# Every key is optional; these are the defaults. Keys are evdev names
+# (KEY_F9, KEY_RIGHTALT+KEY_F23, ...). The compositor must not act on them —
+# see README "Install".
 
-dictate_key = "KEY_F9"     # evdev key names or chords such as KEY_RIGHTALT+KEY_F23
-agent_key   = "KEY_F10"    # niri must consume the corresponding compositor chord
-dictate_toggle_key = ""    # optional pulse key: first press starts, second stops
+dictate_key = "KEY_F9"     # hold: speak, release: text lands in the focused field
+agent_key   = "KEY_F10"    # hold: speak, release: transcript goes to the agent
+dictate_toggle_key = ""    # optional: first press starts, second press stops
 agent_toggle_key   = ""
 language    = "en"
-min_seconds = 0.3          # discard shorter recordings (accidental taps)
-max_seconds = 90.0         # stuck-key safety: abort longer recordings
+min_seconds = 0.3          # shorter recordings are accidental taps
+max_seconds = 90.0         # stuck-key safety: longer recordings are discarded
+recordings_dir = ""        # debug: keep wav + live/final transcripts of every recording
+
+[backend]                  # final pass over the whole recording
+type = "parakeet"          # "parakeet" (CPU, sherpa-onnx) | "faster-whisper" (CUDA)
+model_dir = "~/.local/share/voicekey/sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-non-streaming"
+# faster-whisper only:
+# model = "large-v3-turbo"
+# device = "cuda"
+# compute_type = "float16"
+
+[streaming]                # live preview while the key is held; "" disables it
+model_dir = "~/.local/share/voicekey/sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25"
 
 [dictation]
-inject = "wtype"           # "wtype" (direct typing) | "clipboard" (wl-copy + ctrl+v)
+ime = true                 # live text and final commit through the Wayland input method
+inject = "wtype"           # fallback when the focused app has no text-input support:
+                           # "wtype" (direct typing) | "clipboard" (wl-copy + ctrl+v)
 max_delay_seconds = 10.0   # older transcripts are copied, never typed late
 require_same_window = true # copy instead if niri focus changed during transcription
 
-[backend]
-type  = "faster-whisper"   # "faster-whisper" | "parakeet" | "remote"
-model = "large-v3-turbo"
-device = "cuda"            # faster-whisper: "cuda" | "cpu" | "auto"
-compute_type = "float16"   # cuda: float16; cpu: int8
-
-# parakeet (laptop, CPU): sherpa-onnx Parakeet model directory
-# type = "parakeet"
-# model_dir = "~/.local/share/voicekey/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"
-
-# remote (stub in v1): POST wav to another machine, get text back
-# type = "remote"
-# url = "http://desktop:9188/transcribe"
-
 [agent]
-# Hermes lives in an isolated tmux server, independent of Emacs and voicekey.
-# F10 opens Ghostty only if no terminal is already attached. Closing Ghostty
-# detaches from tmux without killing Hermes or losing its conversation.
+# Hermes lives in its own tmux server, independent of the editor and of
+# voicekey. The agent key opens a terminal only if none is attached; closing
+# it detaches without killing Hermes or losing its conversation.
 target = "hermes"
 transport = "local"
-# For a remote Hermes TUI instead:
+# For a Hermes on another machine over Tailscale:
 # transport = "ssh-over-tailscale"
 # remote_host = "desktop"
 # remote_user = "you"
@@ -46,4 +48,4 @@ terminal = "ghostty"
 terminal_title = "Voicekey Hermes"
 open_terminal = true
 command_timeout = 10.0
-ready_timeout = 300.0       # wait rather than type into a busy/modal/draft TUI
+ready_timeout = 300.0      # wait rather than type into a busy/modal/draft TUI

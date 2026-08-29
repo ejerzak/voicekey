@@ -1,163 +1,127 @@
-# voicekey — global hold-to-talk voice input
+# voicekey — hold-to-talk dictation for Wayland
 
-Hold the configured dictation key, speak, release → the transcript is typed
-into the focused field. If transcription takes too long or niri reports that
-focus moved to another window, voicekey copies the transcript instead of typing
-it somewhere wrong.
+Hold a key and speak. What the recognizer hears appears *as you say it*,
+inline in the field you are typing into, as provisional text. Release the key
+and a second pass over the whole recording replaces it with the final
+transcript. Everything runs locally on the CPU; nothing leaves the machine.
+A second key sends the transcript to an agent (Hermes) instead of typing it.
 
-Hold the configured agent key, speak, release → the transcript is sent to a
-persistent Hermes TUI. This path is independent of Emacs and of the directory
-containing the focused application. On `desktop`, Hermes is local. On
-`laptop`, recording and transcription stay local, while the transcript and
-terminal connection go to `desktop` over OpenSSH routed through
-Tailscale.
+```
+key down  ─ pw-record ─ 100 ms frames ─┬─ streaming model ─ live text ─ preedit in the focused field
+                                       │                               (or a notification)
+                                       └─ buffer
+key up    ─ buffer ─ offline model ─ final text ─ commit in place of the preedit
+                                                  (or wtype / clipboard)
+```
 
-On the laptop, hold **Copilot** for dictation or hold **Right
-Alt+Copilot** for agent input. Linux reports Copilot as
-`Left Meta+Left Shift+F23`; Voicekey routes on F23 and the physically held Right
-Alt. The physical F9 key remains Print Screen. On `desktop`, the bindings
-remain F9 for dictation and F10 for agent input.
+## How it works
 
-On the first agent dispatch, voicekey:
-
-1. connects to the configured local or remote host;
-2. starts a dedicated tmux server in a supervised systemd user unit;
-3. starts `hermes --tui` in a named tmux session and a neutral working directory;
-4. opens a local Ghostty window attached to that session; and
-5. waits for Hermes's composer to be idle and empty before submitting the prompt.
-
-Later agent dispatches reuse the same Hermes process and conversation. If its
-Ghostty window is open, voicekey does not open another. If the window was
-closed, voicekey opens a new one and reattaches it. Ghostty is only a tmux
-client, so closing the window does not stop Hermes. Restarting voicekey does
-not stop Hermes either.
-
-The shared path is evdev → `pw-record` → one warm transcription backend. It
-then splits: dictation is delivered immediately, while agent prompts go through
-a bounded queue and separate worker. A busy Hermes therefore cannot delay
-later dictation.
+- **Two models, on purpose.** Streaming recognizers trade accuracy for
+  latency, so the live text comes from a cache-aware streaming transducer
+  (NVIDIA Nemotron Speech Streaming 0.6B, ~7.1 % WER) and the text that lands
+  comes from an offline model with full context (Parakeet Unified 0.6B,
+  ~5.9 % WER, proper punctuation). Both run through sherpa-onnx as INT8 on the
+  CPU: about 100 ms of compute per 560 ms of speech for the preview and
+  ~0.05× real time for the final pass, so a 10 s utterance is final about
+  half a second after release.
+- **Provisional text is real preedit.** voicekey registers with the
+  compositor as the Wayland *input method* (`zwp_input_method_v2`) — the same
+  mechanism CJK input uses. Any application that speaks `text-input-v3`
+  (GTK, Qt, Emacs pgtk, Firefox, foot, Ghostty, …) draws the live text inline
+  itself and swaps it for the committed string; nothing is ever inserted and
+  later deleted. Applications without text-input support get the preview in
+  a notification and the final text via `wtype`. Because the streaming
+  decoder is greedy, the live text only ever grows.
+- **Focus is respected.** Text is committed only into the field that was
+  active when the key went down; if focus moved, the transcript is copied to
+  the clipboard instead of being typed somewhere wrong.
 
 ## Install
 
-Hermes, tmux, and systemd-run must exist on the configured Hermes host. The
-Voicekey machine needs Ghostty; remote mode additionally needs Tailscale and
-OpenSSH. Fedora's package list installs tmux and Ghostty; on Debian/Ubuntu,
-install Ghostty separately if the distribution does not package it.
+System packages (Fedora names): `pipewire-utils` (`pw-record`), `wtype`,
+`wl-clipboard`, `libnotify`, `gcc` (evdev builds from source), `uv`.
+The compositor must not act on the chosen keys itself — under niri, bind
+them to no-ops:
 
-For the laptop's remote transport, run the standard OpenSSH server on
-`desktop`. Tailscale's built-in SSH server is deliberately disabled
-because Fedora's SELinux policy can prevent it from operating:
-
-```sh
-sudo tailscale set --ssh=false
-sudo systemctl enable --now sshd
+```kdl
+F9  repeat=false allow-inhibiting=false { spawn "true"; }
+F10 repeat=false allow-inhibiting=false { spawn "true"; }
 ```
 
-The laptop's public SSH key must be authorized for `alice` on `desktop`,
-and its `known_hosts` file must contain the desktop's verified host key. The
-tailnet access policy must also allow the laptop to reach port 22. Voicekey
-uses the configured `identity_file` noninteractively and fails closed on an
-unknown or changed host key.
+Then:
 
 ```sh
-install/install.sh 02-dnf       # or 02-apt
-install/install.sh 04-symlinks  # systemd user unit and niri config
-install/install.sh 07-voicekey  # venv, Python deps, model download, checks
-sudo usermod -aG input "$USER"  # one-time; see security note below
-# log out and back in
-install/install.sh 08-services
+./install.sh                    # venv, deps, ~1.1 GB of models, systemd user unit
+sudo usermod -aG input "$USER"  # one-time: raw keyboard access; re-login afterwards
 ```
+
+`install.sh` creates `~/.config/voicekey/config.toml` from
+`config.example.toml` if it doesn't exist. To keep per-machine configs in a
+dotfiles repo, symlink them there before running it. The daemon runs as
+`voicekey.service` in the graphical session.
 
 Diagnostics:
 
 ```sh
-~/.local/share/voicekey/venv/bin/python -m voicekey --check
-journalctl --user -u voicekey
-tmux -L voicekey-hermes has-session -t voicekey-hermes
-systemctl --user status voicekey-voicekey-hermes-tmux.service
-ssh -F /dev/null -o 'ProxyCommand=tailscale nc %h %p' alice@desktop
+~/.local/share/voicekey/venv/bin/python -m voicekey --check         # models, IME, keyboards
+systemctl --user stop voicekey                                      # frees the input method, then:
+~/.local/share/voicekey/venv/bin/python -m voicekey --replay x.wav  # speak a WAV into the focused field
+journalctl --user -u voicekey -f
 ```
 
-The tmux and systemd commands become meaningful after the first agent dispatch.
-To open the persistent Hermes session yourself without starting another Hermes:
-
-```sh
-tmux -L voicekey-hermes attach-session -t voicekey-hermes
-```
-
-Step 07 is the only voicekey stage that downloads model files. It downloads and
-atomically installs the configured Parakeet model on the laptop, and skips the
-download on later runs once all required model files are present. The daemon
-and `--check` never download model data themselves.
-
-`--check` exits 0 when fully ready, 2 when software/backend checks pass but no
-keyboard is readable, 3 when dictation is ready but the configured agent target
-is unavailable, and 1 for a configuration, core dependency, or backend failure.
-Install step 07 treats statuses 2 and 3 as warnings so a missing agent target
-does not prevent working dictation from being installed.
+`--check` exits 0 when fully ready, 2 when no keyboard is readable, 3 when
+only the agent target is unavailable, 1 for a configuration, dependency or
+model failure. Set `recordings_dir` to keep the audio and both transcripts of
+every recording — the way to compare models on your own voice.
 
 ## Configuration
 
-`~/.config/voicekey/config.toml` is a symlink to
-`apps/voicekey/hosts/<hostname>.toml`. The machine hostnames match their
-Tailscale names: `desktop` for the desktop and `laptop` for the
-laptop. Step 07 creates the symlink, falling back to a copy of
-`config.example.toml` on a new host.
+`config.example.toml` lists every key with its default. The ones that matter:
 
-Backends are selected by `[backend].type`:
+| key | meaning |
+|---|---|
+| `dictate_key`, `agent_key` | evdev key names or chords (`KEY_RIGHTALT+KEY_F23`) to hold |
+| `dictate_toggle_key`, `agent_toggle_key` | optional press-to-start, press-to-stop keys |
+| `[backend]` | final pass: `parakeet` (CPU) or `faster-whisper` (CUDA) and its model |
+| `[streaming] model_dir` | live-preview model; `""` disables the preview |
+| `[dictation] ime` | use the input method for preview and commit (default true) |
+| `[dictation] inject` | fallback delivery: `wtype` or `clipboard` |
+| `[dictation] require_same_window` | copy instead of typing if niri focus changed |
+| `[agent]` | Hermes target, local or over SSH via Tailscale |
 
-| backend | machine | notes |
-|---|---|---|
-| `faster-whisper` | optional | large-v3-turbo; CUDA support comes from pip NVIDIA wheels |
-| `parakeet` | desktop + laptop | Unified English 0.6B INT8 on CPU via sherpa-onnx |
-| `remote` | optional | configuration seam only; deliberately unimplemented |
+`install.sh` downloads whichever sherpa-onnx models the config names; the
+known ones are listed in `voicekey/backends.py`.
 
-`[agent].transport` is `local` on the desktop and `ssh-over-tailscale` on the
-laptop. The remote transport runs Hermes and its persistent tmux server on
-`remote_user@remote_host`, but always opens Ghostty on the machine where the
-agent key was pressed. `[agent].working_directory` is deliberately neutral.
-Hermes retains its own session and memory, but a general voice command does not
-accidentally inherit the focused editor's repository. `[agent].target` is the
-adapter seam for future agents; the implemented target is currently only
-`hermes`.
+## Agent dispatch
 
-`ready_timeout` controls how long an agent transcript waits while Hermes is
-busy, showing a modal, or contains a manually typed draft. Later agent
-transcripts stay behind it in the daemon's agent queue. On timeout, delivery
-fails closed and the transcript is written to the recovery file.
+Hold the agent key, speak, release: the transcript is sent to a persistent
+Hermes TUI. On the first dispatch voicekey starts a dedicated tmux server in a
+supervised systemd user unit, starts `hermes --tui` in a named session and a
+neutral working directory, opens a Ghostty window attached to it, and waits
+for the composer to be idle and empty before submitting. Later dispatches
+reuse the same conversation; closing the window only detaches. With
+`transport = "ssh-over-tailscale"` recording and transcription stay local
+while Hermes runs on the remote host (standard OpenSSH server, public-key
+auth, strict host-key checking; Tailscale only supplies the network path).
 
-## Behavior and safety
+```sh
+tmux -L voicekey-hermes attach-session -t voicekey-hermes   # open the session yourself
+```
 
-- Taps shorter than `min_seconds` are discarded.
-- Recordings longer than `max_seconds` are aborted.
-- The transcription queue is bounded; overload discards the newest recording.
-- Dictation older than `dictation.max_delay_seconds` is copied, not typed.
-- With `dictation.require_same_window = true`, a niri window change also causes
-  copy-without-paste.
-- `wtype` failure falls back to `wl-copy` plus simulated Ctrl+V. Terminal paste
-  conventions differ, so direct `wtype` remains the default.
-- The configured Voicekey keys are consumed by no-op niri bindings but remain
-  visible to the raw evdev listener, preventing focused applications from also
-  acting on them.
-- Agent prompts are pasted only when the Hermes status is `ready` and its
-  composer is empty. Voicekey will not type into an approval dialog or overwrite
-  a textual draft.
-- Hermes is launched as its normal interactive TUI. Voicekey never passes its
-  oneshot/automatic-approval flag and never answers approval prompts.
-- Hermes slash, shell, interpolation, path-drop, and path-completion syntax is
-  neutralized for voice input. Control whitespace is collapsed.
-- Agent transcript text goes to tmux over stdin, not command arguments or the
-  journal.
-- Remote commands use OpenSSH public-key authentication with strict host-key
-  checking. Tailscale supplies the private network path but does not replace
-  SSH authentication. The interactive Ghostty client allocates a real remote
-  PTY.
-- If delivery fails, the last undelivered transcript is saved mode 0600 at
+`ready_timeout` bounds how long a transcript waits for a busy Hermes; on
+timeout it is written to the recovery file instead of typed into a dialog.
+
+## Behaviour and safety
+
+- Taps shorter than `min_seconds` are discarded; recordings longer than
+  `max_seconds` are aborted (stuck key).
+- Dictation older than `max_delay_seconds` is copied, not typed.
+- Agent prompts are pasted only when Hermes is idle with an empty composer;
+  voicekey never answers approval prompts. Hermes slash, shell and path
+  syntax is neutralized in voice input.
+- Undelivered transcripts are saved mode 0600 at
   `~/.local/state/voicekey/last-recovery.txt`.
-- Dictation and agent notifications use separate replacement IDs.
-
-Membership in `input` lets every process running as the user read raw keyboard
-events, not merely the configured voice chords. This is acceptable as an
-explicit first-version tradeoff on a personal machine, not a strong security
-boundary. A future version should isolate evdev access in a minimal helper that
-emits only the two configured key transitions.
+- Membership in `input` lets every process of the user read raw keyboard
+  events — an explicit tradeoff for a personal machine, not a security
+  boundary. A minimal evdev helper exposing only the two key transitions
+  would be the fix.

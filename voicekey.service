@@ -1,0 +1,18 @@
+[Unit]
+Description=voicekey hold-to-talk dictation and agent dispatch
+PartOf=graphical-session.target
+After=graphical-session.target
+Requisite=graphical-session.target
+StartLimitIntervalSec=10min
+StartLimitBurst=10
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/voicekey/venv/bin/python -m voicekey
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=graphical-session.target
