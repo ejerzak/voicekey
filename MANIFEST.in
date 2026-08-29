@@ -1,0 +1,1 @@
+include install.sh voicekey.service config.example.toml LICENSE

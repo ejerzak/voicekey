@@ -10,6 +10,11 @@ import numpy as np
 from voicekey import daemon as daemon_mod
 from voicekey.config import Config
 from voicekey.daemon import Daemon, ImePreview, Job, NotifyPreview, Session
+from voicekey.focus import Focus
+
+
+def _focused(window=7, app="ghostty"):
+    return patch("voicekey.daemon.focus.focused", return_value=Focus(window, app))
 
 FRAME = np.zeros(1600, dtype=np.float32)
 
@@ -209,7 +214,7 @@ class DeliveryTests(unittest.TestCase):
 
 class SessionTests(unittest.TestCase):
     @patch("voicekey.daemon.notify")
-    @patch("voicekey.daemon.focus.window_id", return_value=7)
+    @_focused()
     def test_field_is_bound_at_key_down_and_live_text_goes_there(self, _focus, _notify):
         daemon = Daemon(Config())
         daemon.recorder = FakeRecorder()
@@ -232,7 +237,7 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(job.window_id, 7)
 
     @patch("voicekey.daemon.notify")
-    @patch("voicekey.daemon.focus.window_id", return_value=7)
+    @_focused()
     def test_no_rebind_while_previous_text_is_landing(self, _focus, _notify):
         daemon = Daemon(Config())
         daemon.recorder = FakeRecorder()
@@ -243,7 +248,7 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(daemon.session.preview.generation, 5)
 
     @patch("voicekey.daemon.notify")
-    @patch("voicekey.daemon.focus.window_id", return_value=7)
+    @_focused()
     def test_agent_and_inactive_field_preview_in_notifications(self, _focus, _notify):
         daemon = Daemon(Config())
         daemon.recorder = FakeRecorder()
@@ -259,17 +264,16 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(daemon.ime.rebinds, 0)
 
     @patch("voicekey.daemon.notify")
-    @patch("voicekey.daemon.focus.window_id", return_value=None)
+    @_focused(window=None, app=None)
     def test_no_focused_window_means_no_in_field_text(self, _focus, _notify):
         daemon = Daemon(Config())
         daemon.recorder = FakeRecorder()
         daemon.ime = FakeIme(generation=1)  # e.g. a lock screen's password field
         daemon._start("/dev/input/event3", frozenset(), "hold", "dictate", "release")
         self.assertIsInstance(daemon.session.preview, NotifyPreview)
-        self.assertEqual(daemon.ime.rebinds, 0)
 
     @patch("voicekey.daemon.notify")
-    @patch("voicekey.daemon.focus.window_id", return_value=7)
+    @_focused()
     def test_live_recognizer_failure_keeps_the_recording(self, _focus, _notify):
         daemon = Daemon(Config())
         daemon.recorder = FakeRecorder()
@@ -340,7 +344,7 @@ class SessionTests(unittest.TestCase):
         notify.assert_not_called()
 
     @patch("voicekey.daemon.notify")
-    @patch("voicekey.daemon.focus.window_id", return_value=7)
+    @_focused()
     def test_stuck_decoder_disables_the_preview_until_it_exits(self, _focus, _notify):
         daemon = Daemon(Config())
         daemon.recorder = FakeRecorder()
@@ -354,7 +358,7 @@ class SessionTests(unittest.TestCase):
         hang.set()
 
     @patch("voicekey.daemon.notify")
-    @patch("voicekey.daemon.focus.window_id", return_value=7)
+    @_focused()
     def test_preview_setup_failure_keeps_the_recording(self, _focus, _notify):
         daemon = Daemon(Config())
         daemon.recorder = FakeRecorder()
@@ -367,7 +371,7 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(daemon.jobs.get_nowait().action, "dictate")
 
     @patch("voicekey.daemon.notify")
-    @patch("voicekey.daemon.focus.window_id", return_value=7)
+    @_focused()
     def test_toggle_key_uses_two_presses_and_ignores_release(self, _focus, _notify):
         daemon = Daemon(Config(dictate_toggle_key="KEY_CONFIG"))
         daemon.recorder = FakeRecorder()
@@ -386,7 +390,7 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(daemon.jobs.get_nowait().action, "dictate")
 
     @patch("voicekey.daemon.notify")
-    @patch("voicekey.daemon.focus.window_id", return_value=7)
+    @_focused()
     def test_hold_key_starts_on_press_and_stops_on_release(self, _focus, _notify):
         daemon = Daemon(Config())
         daemon.recorder = FakeRecorder()
@@ -399,7 +403,7 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(daemon.jobs.get_nowait().action, "dictate")
 
     @patch("voicekey.daemon.notify")
-    @patch("voicekey.daemon.focus.window_id", return_value=7)
+    @_focused()
     def test_longest_matching_chord_selects_agent(self, _focus, _notify):
         daemon = Daemon(Config(dictate_key="KEY_F23", agent_key="KEY_RIGHTALT+KEY_F23"))
         daemon.recorder = FakeRecorder()
@@ -411,7 +415,7 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(daemon.jobs.get_nowait().action, "agent")
 
     @patch("voicekey.daemon.notify")
-    @patch("voicekey.daemon.focus.window_id", return_value=7)
+    @_focused()
     def test_bare_shared_key_selects_dictation(self, _focus, _notify):
         daemon = Daemon(Config(dictate_key="KEY_F23", agent_key="KEY_RIGHTALT+KEY_F23"))
         daemon.recorder = FakeRecorder()
@@ -422,7 +426,7 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(daemon.jobs.get_nowait().action, "dictate")
 
     @patch("voicekey.daemon.notify")
-    @patch("voicekey.daemon.focus.window_id", return_value=7)
+    @_focused()
     def test_stuck_key_aborts_and_clears_preview(self, _focus, _notify):
         daemon = Daemon(Config(max_seconds=5))
         daemon.recorder = FakeRecorder()
@@ -435,14 +439,17 @@ class SessionTests(unittest.TestCase):
 
 
 class SpacingTests(unittest.TestCase):
-    def _daemon(self, before=None, continuing=None, window=7):
+    def _daemon(self, before=None, continuing=None, window=7, app="ghostty",
+                pending=False, last_window=None):
         daemon = Daemon(Config())
         daemon.recorder = FakeRecorder()
         daemon.ime = FakeIme(generation=1)
         daemon.ime.before_cursor = lambda: before
         daemon._continuing = continuing
-        with patch("voicekey.daemon.notify"), \
-                patch("voicekey.daemon.focus.window_id", return_value=window):
+        daemon._last_window = last_window
+        if pending:
+            daemon.jobs.put_nowait(_job("dictate", window_id=7))
+        with patch("voicekey.daemon.notify"), _focused(window, app):
             daemon._start("/dev/input/event3", frozenset(), "hold", "dictate", "release")
         return daemon
 
@@ -454,13 +461,45 @@ class SpacingTests(unittest.TestCase):
         self.assertEqual(daemon.ime.commits, [(" Second thought.", 1)])
 
     def test_line_start_or_opening_bracket_gets_no_space(self):
-        for before in ("\n", " ", "(", "“"):
-            self.assertEqual(self._daemon(before=before).session.prefix, "", before)
+        for before in ("\n", " ", "(", "“", ""):
+            self.assertEqual(self._daemon(before=before, continuing=7).session.prefix, "", repr(before))
+
+    def test_emacs_reports_nothing_useful_so_continuation_decides(self):
+        self.assertEqual(self._daemon(before="", app="emacs", continuing=7).session.prefix, " ")
+        self.assertEqual(self._daemon(before="", app="emacs", continuing=8).session.prefix, "")
 
     def test_unknown_surroundings_assume_continuation_in_the_same_window(self):
         self.assertEqual(self._daemon(before=None, continuing=7).session.prefix, " ")
         self.assertEqual(self._daemon(before=None, continuing=8).session.prefix, "")
         self.assertEqual(self._daemon(before=None, continuing=None).session.prefix, "")
+
+    def test_without_a_window_nothing_is_a_continuation(self):
+        daemon = self._daemon(before=None, continuing=None, window=None, app=None)
+        self.assertEqual(daemon.session.prefix, "")
+
+    def test_rapid_second_dictation_is_spaced_after_the_first_lands(self):
+        # Key-down while the first dictation is still transcribing: the
+        # preview predicts a space; delivery settles it from what really landed.
+        daemon = self._daemon(before=".", pending=True, last_window=7)
+        self.assertTrue(daemon.session.after_pending)
+        self.assertEqual(daemon.session.prefix, " ")
+        daemon.jobs.get_nowait()
+        daemon._continuing = 7  # the first dictation landed without trailing space
+        ime = FakeIme()
+        job = Job(np.zeros(1), "dictate", 1.0, 7, ImePreview(ime, 1), "live",
+                  "ghostty", ".", True)
+        with patch("voicekey.daemon.notify"), patch("voicekey.daemon.focus.window_id", return_value=7), \
+                patch("voicekey.daemon.time.monotonic", return_value=2.0):
+            daemon._deliver_dictation(job, "Second.")
+        self.assertEqual(ime.commits, [(" Second.", 1)])
+        daemon._continuing = None  # the first dictation ended with a newline
+        ime = FakeIme()
+        job = Job(np.zeros(1), "dictate", 1.0, 7, ImePreview(ime, 1), "live",
+                  "ghostty", ".", True)
+        with patch("voicekey.daemon.notify"), patch("voicekey.daemon.focus.window_id", return_value=7), \
+                patch("voicekey.daemon.time.monotonic", return_value=2.0):
+            daemon._deliver_dictation(job, "Second.")
+        self.assertEqual(ime.commits, [("Second.", 1)])
 
     def test_punctuation_joins_without_a_space(self):
         self.assertEqual(daemon_mod.spaced(" ", ", however"), ", however")
@@ -476,12 +515,18 @@ class SpacingTests(unittest.TestCase):
         self.assertEqual(daemon._continuing, 7)
         daemon._deliver_dictation(_job("dictate", ImePreview(FakeIme(), 1), 7), "Hello.\n")
         self.assertIsNone(daemon._continuing)
+
+    @patch("voicekey.daemon.notify")
+    @patch("voicekey.daemon.focus.window_id", return_value=7)
+    @patch("voicekey.daemon.time.monotonic", return_value=2.0)
+    def test_a_copy_leaves_the_spacing_state_alone(self, _clock, _focus, _notify):
+        daemon = Daemon(Config())
+        daemon._continuing = 7
+        preview = ImePreview(FakeIme(), 1)
+        preview.ime.commit_result = False
         with patch("voicekey.daemon.inject_mod.copy"):
-            preview = ImePreview(FakeIme(), 1)
-            preview.ime.commit_result = False
-            daemon._continuing = 7
             daemon._deliver_dictation(_job("dictate", preview, 7), "Hello.")
-        self.assertIsNone(daemon._continuing, "a copy is not a continuation")
+        self.assertEqual(daemon._continuing, 7, "the field was not changed by a copy")
 
 
 class BindingsTests(unittest.TestCase):

@@ -5,12 +5,19 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+from dataclasses import dataclass
 
 log = logging.getLogger("voicekey.focus")
 
 
-def window_id() -> int | None:
-    """Return niri's focused window id, or None when it cannot be queried."""
+@dataclass(frozen=True)
+class Focus:
+    id: int | None = None
+    app_id: str | None = None
+
+
+def focused() -> Focus:
+    """niri's focused window, or an empty Focus when it cannot be queried."""
     try:
         result = subprocess.run(
             ["niri", "msg", "--json", "focused-window"],
@@ -19,15 +26,23 @@ def window_id() -> int | None:
             timeout=2,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return None
+        return Focus()
     if result.returncode != 0:
-        return None
+        return Focus()
     try:
         data = json.loads(result.stdout)
     except json.JSONDecodeError:
         log.warning("niri returned invalid focused-window JSON")
-        return None
+        return Focus()
     if not isinstance(data, dict):
-        return None
-    value = data.get("id")
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
+        return Focus()
+    window_id = data.get("id")
+    app_id = data.get("app_id")
+    return Focus(
+        window_id if isinstance(window_id, int) and not isinstance(window_id, bool) else None,
+        app_id if isinstance(app_id, str) else None,
+    )
+
+
+def window_id() -> int | None:
+    return focused().id

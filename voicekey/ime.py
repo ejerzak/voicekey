@@ -112,14 +112,13 @@ class InputMethod:
         return self._generation
 
     def before_cursor(self) -> str | None:
-        """The character before the cursor in the active field, when the
-        application reports its surrounding text (GTK fields, Firefox);
-        None when unknown (terminals, Emacs) or at the start of the text."""
+        """The character before the cursor in the active field, "" when the
+        application reports surrounding text with nothing before the cursor,
+        None when it reports none at all (terminals)."""
         if not self._active or self._surrounding is None:
             return None
         text, cursor = self._surrounding
-        before = text.encode()[:cursor].decode(errors="ignore")
-        return before[-1:] or None
+        return text.encode()[:cursor].decode(errors="ignore")[-1:]
 
     def rebind(self) -> bool:
         """Bind afresh; the activation for a focused field follows shortly."""
@@ -163,7 +162,7 @@ class InputMethod:
                     state["cancelled"] = True
                     log.warning("the input method did not respond within %.0fs", CALL_TIMEOUT)
                     return False
-            done.wait(30.0)
+            done.wait()  # started: only its real outcome is safe to report
         return bool(result and result[0])
 
     def close(self) -> None:
