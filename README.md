@@ -31,9 +31,10 @@ transcript. Everything runs locally on the CPU; nothing leaves the machine.
 - `uv` (installs Python 3.12 into a private venv), `gcc` (the evdev
   package builds from source), and `pw-record`, `wtype`, `wl-copy`,
   `notify-send`.
-- About 1.1 GB of disk for the two models and 1.6 GB of RAM while running.
-  Any recent x86_64 CPU is fine: the live recognizer uses roughly a fifth
-  of one core, the final pass takes about 5 % of the recording's length.
+- About 1.1 GB of disk for the two models and 1.7 GB of RAM while running.
+  Idle cost is nil. While you speak, the live recognizer keeps roughly one
+  core busy (measured 0.75 core on a desktop i5); the final pass then
+  takes about 5 % of the recording's length on four cores.
 - English speech. Both models are English-only.
 
 Fedora: `sudo dnf install gcc pipewire-utils wl-clipboard libnotify wtype uv`

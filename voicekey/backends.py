@@ -27,7 +27,12 @@ from .config import BackendConfig, StreamingConfig
 log = logging.getLogger("voicekey.backends")
 
 SAMPLE_RATE = 16000
-NUM_THREADS = 4  # 2-4 is the sweet spot on a desktop CPU; more is slower
+# onnxruntime's thread pool spin-waits, so extra threads cost CPU time
+# without buying latency: the streaming model decodes a 560 ms chunk in the
+# same ~100 ms wall time on 2 threads as on 4, for less than half the CPU.
+# The final pass is a short burst, where 4 threads do finish sooner.
+STREAMING_THREADS = 2
+OFFLINE_THREADS = 4
 RELEASES = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
 MODEL_FILES = ("encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt")
 # sherpa-onnx model archives: each unpacks to <name>/ holding MODEL_FILES,
@@ -85,7 +90,7 @@ def _model_files(model_dir: str) -> dict[str, str]:
 class ParakeetBackend:
     def __init__(self, cfg: BackendConfig, language: str) -> None:
         self.recognizer = _sherpa().OfflineRecognizer.from_transducer(
-            num_threads=NUM_THREADS,
+            num_threads=OFFLINE_THREADS,
             model_type="nemo_transducer",
             **_model_files(cfg.model_dir),
         )
@@ -154,7 +159,7 @@ class StreamingBackend:
 
     def __init__(self, cfg: StreamingConfig) -> None:
         self.recognizer = _sherpa().OnlineRecognizer.from_transducer(
-            num_threads=NUM_THREADS,
+            num_threads=STREAMING_THREADS,
             model_type="nemotron",
             **_model_files(cfg.model_dir),
         )
