@@ -319,6 +319,7 @@ class Daemon:
             on_no_access=lambda msg: notify(
                 "voicekey: no keyboard access", msg, error=True
             ),
+            on_activity=self._on_activity,
         )
         log.info("listening: %s", ", ".join(self.bindings()))
         listener.run()
@@ -492,6 +493,11 @@ class Daemon:
     def _note_stuck(self, session: Session) -> None:
         if session.stuck:
             self._stuck = session.decoder
+
+    def _on_activity(self) -> None:
+        """The user typed or clicked since the last dictation landed: the
+        automatic space assumes voicekey was the last to touch the text."""
+        self._continuing = None
 
     def _on_device_lost(self, device: str) -> None:
         self.pressed.pop(device, None)

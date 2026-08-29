@@ -42,15 +42,18 @@ class KeyboardListener:
       on_device_lost(device_path)          — device vanished (may hold a key)
       on_tick()                            — every loop iteration (~1s max)
       on_no_access(message)                — no readable key devices (once per outage)
+      on_activity()                        — any other key or button was pressed
+                                             (the fact only; never which one)
     """
 
     def __init__(self, keycodes: set[int], on_key, on_device_lost, on_tick,
-                 on_no_access) -> None:
+                 on_no_access, on_activity=None) -> None:
         self.keycodes = keycodes
         self.on_key = on_key
         self.on_device_lost = on_device_lost
         self.on_tick = on_tick
         self.on_no_access = on_no_access
+        self.on_activity = on_activity
         self.devices: dict[str, InputDevice] = {}
         self._last_rescan = 0.0
         self._no_access_reported = False
@@ -103,6 +106,16 @@ class KeyboardListener:
             pass
         self.on_device_lost(path)
 
+    def dispatch(self, device_path: str, events) -> None:
+        for ev in events:
+            if ev.type != ecodes.EV_KEY:
+                continue
+            if ev.code in self.keycodes:
+                if ev.value in (0, 1):  # ignore repeats (2)
+                    self.on_key(device_path, ev.code, ev.value)
+            elif ev.value == 1 and self.on_activity is not None:
+                self.on_activity()
+
     def run(self) -> None:
         self._rescan()
         while True:
@@ -132,8 +145,5 @@ class KeyboardListener:
                 except OSError:
                     self._drop(dev.path)
                     continue
-                for ev in events:
-                    if (ev.type == ecodes.EV_KEY and ev.code in self.keycodes
-                            and ev.value in (0, 1)):  # ignore repeats (2)
-                        self.on_key(dev.path, ev.code, ev.value)
+                self.dispatch(dev.path, events)
             self.on_tick()
