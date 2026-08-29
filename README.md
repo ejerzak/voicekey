@@ -93,8 +93,8 @@ Spacing between dictations is automatic: a dictation that continues text
 gets a leading space, one that starts a line or follows an opening bracket
 does not. The character before the cursor decides when the application
 reports it (GTK fields, Firefox); terminals and Emacs report nothing, so
-there voicekey assumes it is continuing its own previous dictation in that
-window.
+there voicekey adds a space only when it was itself the last thing to type
+in that window — any key or click in between leaves spacing to you.
 
 ## Configuration
 

@@ -516,6 +516,12 @@ class SpacingTests(unittest.TestCase):
         daemon._deliver_dictation(_job("dictate", ImePreview(FakeIme(), 1), 7), "Hello.\n")
         self.assertIsNone(daemon._continuing)
 
+    def test_typing_in_between_leaves_spacing_to_the_user(self):
+        daemon = Daemon(Config())
+        daemon._continuing = 7
+        daemon._on_activity()
+        self.assertEqual(daemon._prefix(None, "ghostty", 7), "")
+
     @patch("voicekey.daemon.notify")
     @patch("voicekey.daemon.focus.window_id", return_value=7)
     @patch("voicekey.daemon.time.monotonic", return_value=2.0)

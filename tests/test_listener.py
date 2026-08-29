@@ -5,7 +5,28 @@ from unittest.mock import Mock
 
 from evdev import ecodes
 
-from voicekey.listener import _supports_any_key
+from voicekey.listener import KeyboardListener, _supports_any_key
+
+
+def _event(code, value, type_=ecodes.EV_KEY):
+    return Mock(type=type_, code=code, value=value)
+
+
+class DispatchTests(unittest.TestCase):
+    def test_voice_keys_go_to_on_key_and_everything_else_is_only_activity(self):
+        on_key, on_activity = Mock(), Mock()
+        listener = KeyboardListener({ecodes.KEY_F9}, on_key, Mock(), Mock(), Mock(),
+                                    on_activity=on_activity)
+        listener.dispatch("/dev/input/event3", [
+            _event(ecodes.KEY_F9, 1), _event(ecodes.KEY_F9, 2), _event(ecodes.KEY_F9, 0),
+            _event(ecodes.KEY_A, 1), _event(ecodes.KEY_A, 0),
+            _event(ecodes.BTN_LEFT, 1),
+            _event(ecodes.REL_X, 5, type_=ecodes.EV_REL),
+        ])
+        self.assertEqual([c.args for c in on_key.call_args_list],
+                         [("/dev/input/event3", ecodes.KEY_F9, 1),
+                          ("/dev/input/event3", ecodes.KEY_F9, 0)])
+        self.assertEqual(on_activity.call_count, 2, "a key and a click; no repeats, no releases")
 
 
 class InputDeviceSelectionTests(unittest.TestCase):
