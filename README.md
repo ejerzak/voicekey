@@ -39,7 +39,7 @@ Fedora: `sudo dnf install gcc pipewire-utils wl-clipboard libnotify wtype uv`
 ## Install
 
 ```sh
-git clone https://github.com/<you>/voicekey.git && cd voicekey
+git clone https://github.com/ejerzak/voicekey.git && cd voicekey
 ./install.sh                     # venv, models, user service, config file
 sudo usermod -aG input "$USER"   # raw keyboard access; log out and back in
 ```
