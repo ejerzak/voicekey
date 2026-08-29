@@ -91,7 +91,11 @@ class KeyboardListener:
                 log.info("watching %s (%s)", path, dev.name)
             else:
                 dev.close()
-        if not self.devices:
+        voice_devices = [
+            dev for dev in self.devices.values()
+            if _supports_any_key(dev, self.keycodes)
+        ]
+        if not voice_devices:
             if denied and not self._no_access_reported:
                 self._no_access_reported = True
                 self.on_no_access(

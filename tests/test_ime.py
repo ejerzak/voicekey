@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from voicekey import ime as ime_mod
-from voicekey.ime import InputMethod
+from voicekey.ime import ImeHung, InputMethod
 
 
 class FakeProxy:
@@ -177,8 +177,11 @@ class FailureTests(unittest.TestCase):
             return True
 
         threading.Thread(target=lambda: ime._commands.get(timeout=2)(), daemon=True).start()
-        with patch.object(ime_mod, "CALL_TIMEOUT", 0.02), patch.object(ime_mod, "STARTED_TIMEOUT", 0.05):
-            self.assertFalse(ime._call(operation))
+        with patch.object(ime_mod, "CALL_TIMEOUT", 0.02), patch.object(ime_mod, "STARTED_TIMEOUT", 0.05), \
+                patch.object(ime, "_sever") as sever:
+            with self.assertRaises(ImeHung):
+                ime._call(operation)
+        sever.assert_called_once()
         self.assertTrue(ime._dead)
         self.assertIsNone(ime.activation())
         release.set()

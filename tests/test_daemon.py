@@ -10,6 +10,7 @@ import numpy as np
 from voicekey import daemon as daemon_mod
 from voicekey.config import Config
 from voicekey.daemon import Daemon, ImePreview, Job, NotifyPreview, Session, Spacing
+from voicekey.ime import ImeHung
 from voicekey.focus import Focus
 
 
@@ -472,9 +473,22 @@ class SpacingRuleTests(unittest.TestCase):
         spacing.user_typed()
         self.assertEqual(spacing.owed(None, "ghostty", 7), "")
 
+    def test_landing_is_counted_per_window(self):
+        spacing = Spacing()
+        spacing.queued(7)
+        spacing.queued(8)
+        spacing.queued(7)
+        self.assertEqual(spacing.predict(7, "ghostty", ""), " ")
+        spacing.landed(7)  # one of the two for window 7 delivered
+        self.assertEqual(spacing.predict(7, "ghostty", ""), " ", "another is still queued")
+        spacing.landed(8)
+        self.assertEqual(spacing.predict(8, "ghostty", ""), "")
+        spacing.landed(7)
+        self.assertEqual(spacing.predict(7, "ghostty", ""), "")
+
     def test_prediction_assumes_our_landing_text_and_settlement_uses_what_landed(self):
         spacing = Spacing()
-        spacing.landing = 7
+        spacing.queued(7)
         self.assertEqual(spacing.predict(7, "ghostty", "."), " ")
         self.assertEqual(spacing.predict(8, "ghostty", ""), "", "another window: not ours")
         job = Job(np.zeros(1), "dictate", 1.0, 7, NotifyPreview("dictate"), "live",
@@ -498,7 +512,8 @@ class SpacingIntegrationTests(unittest.TestCase):
         daemon.recorder = FakeRecorder()
         daemon.ime = FakeIme(generation=1)
         daemon.ime.before_cursor = lambda: before
-        daemon.spacing.landing = landing
+        if landing is not None:
+            daemon.spacing.queued(landing)
         if queued:
             daemon.jobs.put_nowait(_job(queued, window_id=9))
         with patch("voicekey.daemon.notify"), _focused(window, app):
@@ -535,19 +550,32 @@ class SpacingIntegrationTests(unittest.TestCase):
             daemon._deliver_dictation(job, "Second.")
         self.assertEqual(ime.commits, [(" Second.", 1)])
 
-    def test_queued_dictation_marks_its_window_as_landing_until_delivered(self):
+    def test_queued_dictation_counts_as_landing_until_the_worker_is_done(self):
         daemon = self._daemon()
         daemon._finish()
-        self.assertEqual(daemon.spacing.landing, 7)
+        self.assertTrue(daemon.spacing.landing_in(7))
         daemon.backend = Mock()
         daemon.backend.transcribe.return_value = ""
-        job = daemon.jobs.get_nowait()
         with patch("voicekey.daemon.notify"):
-            daemon._process(job)
-        # the worker's finally-clause clears it
-        if daemon.spacing.landing == job.window_id:
-            daemon.spacing.landing = None
-        self.assertIsNone(daemon.spacing.landing)
+            threading.Thread(target=daemon._transcription_worker, daemon=True).start()
+            daemon.jobs.join()
+        self.assertFalse(daemon.spacing.landing_in(7))
+
+    @patch("voicekey.daemon.notify")
+    @patch("voicekey.daemon.inject_mod.copy")
+    @patch("voicekey.daemon.inject_mod.type_text")
+    @patch("voicekey.daemon.focus.window_id", return_value=7)
+    @patch("voicekey.daemon.time.monotonic", return_value=2.0)
+    def test_hung_input_method_saves_the_text_and_neither_types_nor_copies(
+            self, _clock, _focus, type_text, copy, _notify):
+        daemon = Daemon(Config())
+        preview = ImePreview(FakeIme(), 1)
+        preview.ime.commit = Mock(side_effect=ImeHung("stopped responding"))
+        with patch("voicekey.daemon.recovery.save", return_value="/secure/path") as save:
+            daemon._deliver_dictation(_job("dictate", preview, 7), "Hello.")
+        save.assert_called_once_with("Hello.")
+        copy.assert_not_called()
+        type_text.assert_not_called()
 
     @patch("voicekey.daemon.notify")
     @patch("voicekey.daemon.focus.window_id", return_value=7)

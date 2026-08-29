@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from evdev import ecodes
 
@@ -10,6 +10,26 @@ from voicekey.listener import KeyboardListener, _is_keyboard, _supports_any_key
 
 def _event(code, value, type_=ecodes.EV_KEY):
     return Mock(type=type_, code=code, value=value)
+
+
+class RescanTests(unittest.TestCase):
+    def test_a_readable_activity_keyboard_does_not_hide_a_denied_voice_key_device(self):
+        keyboard = Mock(path="/dev/input/event1", name="typing keyboard")
+        keyboard.capabilities.return_value = {ecodes.EV_KEY: [ecodes.KEY_A, ecodes.KEY_ENTER]}
+
+        def open_device(path):
+            if path == "/dev/input/event1":
+                return keyboard
+            raise PermissionError(path)
+
+        on_no_access = Mock()
+        listener = KeyboardListener({ecodes.KEY_F9}, Mock(), Mock(), Mock(), on_no_access)
+        with patch("voicekey.listener.all_event_devices",
+                   return_value={"/dev/input/event1", "/dev/input/event2"}), \
+                patch("voicekey.listener.InputDevice", side_effect=open_device):
+            listener._rescan()
+        self.assertIn("/dev/input/event1", listener.devices, "watched for activity")
+        on_no_access.assert_called_once()
 
 
 class DispatchTests(unittest.TestCase):

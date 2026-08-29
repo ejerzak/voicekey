@@ -20,6 +20,7 @@ import logging
 import os
 import queue
 import select
+import socket
 import threading
 
 log = logging.getLogger("voicekey.ime")
@@ -35,6 +36,12 @@ EVENTS = (
 
 class ImeUnavailable(Exception):
     """No Wayland display, no input-method support, or another IME is bound."""
+
+
+class ImeHung(Exception):
+    """A started request did not complete: the compositor stopped responding.
+    The connection has been severed, but a request already handed to the
+    kernel may still reach the compositor when it recovers."""
 
 
 class InputMethod:
@@ -166,11 +173,19 @@ class InputMethod:
                     log.warning("the input method did not respond within %.0fs", CALL_TIMEOUT)
                     return False
             if not done.wait(STARTED_TIMEOUT):
-                log.error("the input method has hung; in-field text is off until restart")
                 self._dead = True
                 self._active = False
-                return False
+                self._sever()
+                raise ImeHung("the input method stopped responding; in-field text is off until restart")
         return bool(result and result[0])
+
+    def _sever(self) -> None:
+        """Shut the socket down from this thread so the loop thread's blocked
+        request fails instead of completing later."""
+        try:
+            socket.socket(fileno=os.dup(self._display.get_fd())).shutdown(socket.SHUT_RDWR)
+        except Exception as exc:
+            log.warning("could not sever the input-method connection: %s", exc)
 
     def close(self) -> None:
         self._closing = True

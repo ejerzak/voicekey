@@ -19,6 +19,7 @@ import queue
 import sys
 import threading
 import time
+from collections import Counter
 from dataclasses import dataclass
 
 import numpy as np
@@ -30,7 +31,7 @@ from . import inject as inject_mod
 from . import recovery
 from .backends import BackendUnavailable, create_backend, create_streaming
 from .config import Config, ConfigError, key_chord_names
-from .ime import ImeUnavailable, InputMethod
+from .ime import ImeHung, ImeUnavailable, InputMethod
 from .listener import KeyboardListener
 from .notify import notify
 from .recorder import Recorder, RecordingError
@@ -142,11 +143,23 @@ class Spacing:
         self._lock = threading.Lock()
         self._continuing: int | str | None = None  # window voicekey typed into last
         self._activity = 0  # keystrokes seen; guards inserted() against a race
-        self.landing: int | str | None = None  # window of a dictation not yet delivered
+        self._landing: Counter = Counter()  # dictations queued per window, undelivered
+
+    def queued(self, window_id) -> None:
+        with self._lock:
+            self._landing[window_id] += 1
+
+    def landed(self, window_id) -> None:
+        with self._lock:
+            self._landing[window_id] -= 1
+
+    def landing_in(self, window_id) -> bool:
+        with self._lock:
+            return window_id is not None and self._landing[window_id] > 0
 
     def predict(self, window_id, app_id: str | None, before: str | None) -> str:
         """At key-down, for the preview."""
-        if window_id is not None and window_id == self.landing:
+        if self.landing_in(window_id):
             return " "  # our own text is about to land there
         return self.owed(before, app_id, window_id)
 
@@ -454,12 +467,16 @@ class Daemon:
         """Bind the field first, milliseconds after key-down, then the rest;
         text will go only to the field active now."""
         dictate = session.action == "dictate"
-        generation = self._bind_field() if dictate and self.ime is not None else None
+        generation = None
+        if dictate and self.ime is not None:
+            try:
+                generation = self._bind_field()
+            except ImeHung as exc:
+                log.error("%s", exc)
         if dictate:
             focused = focus.focused()
             session.window_id, session.app_id = focused.id, focused.app_id
-            session.after_landing = (session.window_id is not None
-                                     and session.window_id == self.spacing.landing)
+            session.after_landing = self.spacing.landing_in(session.window_id)
         # In-field text needs a real focused window: a lock screen or launcher
         # can activate the input method too, and text must never land there.
         if generation is not None and (
@@ -511,11 +528,13 @@ class Daemon:
         job = Job(samples, session.action, time.monotonic(), session.window_id,
                   session.preview, session.text, session.app_id, session.before,
                   session.after_landing)
+        if job.action == "dictate":
+            self.spacing.queued(job.window_id)  # before the worker can deliver it
         try:
             self.jobs.put_nowait(job)
-            if job.action == "dictate":
-                self.spacing.landing = job.window_id
         except queue.Full:
+            if job.action == "dictate":
+                self.spacing.landed(job.window_id)
             session.preview.clear()
             notify("voicekey: busy",
                    "too many recordings queued; newest recording discarded", error=True)
@@ -556,8 +575,8 @@ class Daemon:
                 job.preview.clear()
                 notify("voicekey: error", f"{type(exc).__name__}: {exc}", error=True)
             finally:
-                if job.action == "dictate" and self.spacing.landing == job.window_id:
-                    self.spacing.landing = None
+                if job.action == "dictate":
+                    self.spacing.landed(job.window_id)
                 self.jobs.task_done()
 
     def _process(self, job: Job) -> None:
@@ -599,7 +618,15 @@ class Daemon:
         mark = self.spacing.mark()
         if isinstance(job.preview, ImePreview):
             job.preview.prefix = prefix
-            if self._same_window(job) and job.preview.commit(text):
+            try:
+                committed = self._same_window(job) and job.preview.commit(text)
+            except ImeHung as exc:
+                # The commit may still land when the compositor recovers, so
+                # neither type nor copy it: keep it where nothing can duplicate.
+                self._delivery_failed("voicekey: input method hung",
+                                      f"{exc}; the text may still appear when the compositor recovers", text)
+                return
+            if committed:
                 log.info("committed in place")
                 self._inserted(job, text, mark)
                 return
