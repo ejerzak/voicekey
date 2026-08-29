@@ -78,6 +78,7 @@ class InputMethod:
         self._generation = 0
         self._serial = 0  # number of `done` events received; echoed in commit()
         self._unavailable = False
+        self._surrounding: tuple[str, int] | None = None
         self._dead = False
         self._closing = False
         self._commands: queue.SimpleQueue = queue.SimpleQueue()
@@ -109,6 +110,16 @@ class InputMethod:
         if self._dead or self._unavailable or not self._active:
             return None
         return self._generation
+
+    def before_cursor(self) -> str | None:
+        """The character before the cursor in the active field, when the
+        application reports its surrounding text (GTK fields, Firefox);
+        None when unknown (terminals, Emacs) or at the start of the text."""
+        if not self._active or self._surrounding is None:
+            return None
+        text, cursor = self._surrounding
+        before = text.encode()[:cursor].decode(errors="ignore")
+        return before[-1:] or None
 
     def rebind(self) -> bool:
         """Bind afresh; the activation for a focused field follows shortly."""
@@ -154,12 +165,13 @@ class InputMethod:
 
     def _on_activate(self, im) -> None:
         self._pending_active = True
+        self._surrounding = None
 
     def _on_deactivate(self, im) -> None:
         self._pending_active = False
 
     def _on_surrounding_text(self, im, text, cursor, anchor) -> None:
-        pass
+        self._surrounding = (text, cursor)
 
     def _on_text_change_cause(self, im, cause) -> None:
         pass

@@ -42,6 +42,13 @@ key up    ─ buffer ─ offline model ─ final text ─ commit in place of the
   gets the weaker guard niri can offer: same *window*, or copy. Pressing the
   key again while the previous text is still landing is fine; the earlier
   text lands first.
+- **Spacing is automatic.** A dictation that continues existing text gets a
+  leading space; one that starts a line or follows an opening bracket does
+  not. The character before the cursor decides when the application
+  reports it (GTK fields, Firefox); terminals and Emacs don't, so there
+  voicekey assumes it is continuing its own previous dictation in that
+  window. The space is shown in the preview too, so nothing jumps at
+  commit.
 - **Audio comes first.** Capture starts before anything else at key-down, and
   the live recognizer decodes on its own thread; if it falls behind, only
   the preview is dropped, never microphone audio for the final pass.

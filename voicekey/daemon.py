@@ -45,6 +45,8 @@ AGENT_QUEUE_SIZE = 8
 PREVIEW_INTERVAL = 0.25  # seconds between notification updates
 ACTIVATION_WAIT = 0.2  # seconds to wait for the focused field after binding
 OVERLOAD_FRAMES = 30  # 3 s of audio the live recognizer may fall behind
+NO_SPACE_AFTER = " \t\n([{\"'“‘"  # characters a dictation may follow directly
+NO_SPACE_BEFORE = ",.;:!?)]}"  # dictations starting like this join the text
 
 
 def _keycode(name: str) -> int:
@@ -93,20 +95,29 @@ class NotifyPreview:
 class ImePreview:
     """Live text as preedit in the field active at key-down; commit replaces
     it in place. Both carry that field's activation generation, so nothing
-    reaches a field that gained focus later."""
+    reaches a field that gained focus later, and the spacing prefix decided
+    at key-down, so nothing jumps at commit."""
 
-    def __init__(self, ime: InputMethod, generation: int) -> None:
+    def __init__(self, ime: InputMethod, generation: int, prefix: str = "") -> None:
         self.ime = ime
         self.generation = generation
+        self.prefix = prefix
 
     def update(self, text: str) -> None:
-        self.ime.preedit(text, self.generation)
+        self.ime.preedit(spaced(self.prefix, text), self.generation)
 
     def clear(self) -> None:
         self.ime.preedit("", self.generation)
 
     def commit(self, text: str) -> bool:
-        return self.ime.commit(text, self.generation)
+        return self.ime.commit(spaced(self.prefix, text), self.generation)
+
+
+def spaced(prefix: str, text: str) -> str:
+    """PREFIX is the space owed between the existing text and this
+    dictation; it is dropped when the dictation itself starts with
+    punctuation or whitespace."""
+    return text if not text or text[0] in NO_SPACE_BEFORE or text[0].isspace() else prefix + text
 
 
 # --- one held key -----------------------------------------------------------
@@ -124,6 +135,7 @@ class Session:
         self.device = device
         self.window_id = window_id
         self.preview: NotifyPreview | ImePreview = NotifyPreview(action)
+        self.prefix = ""  # space owed before this dictation; see Daemon._spacing
         self.text = ""
         self._stream = stream
         self._frames: queue.Queue = queue.Queue(maxsize=OVERLOAD_FRAMES)
@@ -203,6 +215,7 @@ class Job:
     window_id: int | None
     preview: NotifyPreview | ImePreview
     live_text: str
+    prefix: str = ""
 
 
 class Daemon:
@@ -225,6 +238,9 @@ class Daemon:
         self.ime: InputMethod | None = None
         self.jobs: queue.Queue[Job] = queue.Queue(maxsize=TRANSCRIPTION_QUEUE_SIZE)
         self.agent_prompts: queue.Queue[str] = queue.Queue(maxsize=AGENT_QUEUE_SIZE)
+        # Window that received the last inserted dictation, when that text did
+        # not end in whitespace: the next dictation there is owed a space.
+        self._continuing: int | None = None
 
     def load(self) -> None:
         """Load both models and register as the input method; each failure
@@ -356,6 +372,9 @@ class Daemon:
             generation = self._bind_field()
             if generation is not None:
                 session.preview = ImePreview(self.ime, generation)
+        session.prefix = self._spacing(session)
+        if isinstance(session.preview, ImePreview):
+            session.preview.prefix = session.prefix
         log.info("%s: %s preview", action,
                  "in-field" if isinstance(session.preview, ImePreview) else "notification")
         notify(f"● Recording ({LABEL[action]})", stop_instruction, ms=60000, channel=action)
@@ -374,6 +393,15 @@ class Daemon:
             time.sleep(0.005)
         return generation
 
+    def _spacing(self, session: Session) -> str:
+        """The space owed before this dictation. Decided from the character
+        before the cursor when the application reports it; otherwise assume
+        we are continuing our own previous dictation in the same window."""
+        before = self.ime.before_cursor() if isinstance(session.preview, ImePreview) else None
+        if before is not None:
+            return "" if before in NO_SPACE_AFTER else " "
+        return " " if session.window_id == self._continuing else ""
+
     def _finish(self) -> None:
         session, self.session = self.session, None
         try:
@@ -391,7 +419,7 @@ class Daemon:
             return
         session.finish()
         job = Job(samples, session.action, time.monotonic(), session.window_id,
-                  session.preview, session.text)
+                  session.preview, session.text, session.prefix)
         try:
             self.jobs.put_nowait(job)
         except queue.Full:
@@ -467,7 +495,7 @@ class Daemon:
         if isinstance(job.preview, ImePreview):
             if self._same_window(job) and job.preview.commit(text):
                 log.info("committed in place")
-                notify("✓ Typed", channel="dictate")
+                self._inserted(job, text)
                 return
             job.preview.clear()
             self._copy_instead(text, "the field changed; copied instead of typing")
@@ -477,14 +505,18 @@ class Daemon:
             return
         if self.cfg.dictation.inject == "wtype":
             try:
-                inject_mod.type_text(text)
+                inject_mod.type_text(spaced(job.prefix, text))
             except Exception as exc:
                 self._copy_instead(text, f"typing failed ({exc}); copied instead")
                 return
             log.info("typed via wtype")
-            notify("✓ Typed", channel="dictate")
+            self._inserted(job, text)
             return
         self._copy_instead(text, "", summary="📋 Copied")
+
+    def _inserted(self, job: Job, text: str) -> None:
+        self._continuing = None if text[-1].isspace() else job.window_id
+        notify("✓ Typed", channel="dictate")
 
     def _same_window(self, job: Job) -> bool:
         if not self.cfg.dictation.require_same_window:
@@ -493,6 +525,7 @@ class Daemon:
 
     def _copy_instead(self, text: str, reason: str, *, summary: str = "voicekey: not typed") -> None:
         log.info("not typed: %s", reason or "copied")
+        self._continuing = None
         try:
             inject_mod.copy(text)
         except Exception as exc:

@@ -55,6 +55,9 @@ class FakeIme:
         self.rebinds += 1
         return True
 
+    def before_cursor(self):
+        return None
+
     def preedit(self, text, generation):
         self.preedits.append((text, generation))
 
@@ -364,6 +367,56 @@ class SessionTests(unittest.TestCase):
         daemon._on_tick()
         self.assertIsNone(daemon.session)
         self.assertEqual(daemon.ime.preedits, [("", 1)])
+
+
+class SpacingTests(unittest.TestCase):
+    def _daemon(self, before=None, continuing=None, window=7):
+        daemon = Daemon(Config())
+        daemon.recorder = FakeRecorder()
+        daemon.ime = FakeIme(generation=1)
+        daemon.ime.before_cursor = lambda: before
+        daemon._continuing = continuing
+        with patch("voicekey.daemon.notify"), \
+                patch("voicekey.daemon.focus.window_id", return_value=window):
+            daemon._start("/dev/input/event3", frozenset(), "hold", "dictate", "release")
+        return daemon
+
+    def test_continuing_text_gets_a_leading_space_in_preview_and_commit(self):
+        daemon = self._daemon(before=".")
+        daemon.session.preview.update("Second thought")
+        self.assertEqual(daemon.ime.preedits, [(" Second thought", 1)])
+        daemon.session.preview.commit("Second thought.")
+        self.assertEqual(daemon.ime.commits, [(" Second thought.", 1)])
+
+    def test_line_start_or_opening_bracket_gets_no_space(self):
+        for before in ("\n", " ", "(", "“"):
+            self.assertEqual(self._daemon(before=before).session.prefix, "", before)
+
+    def test_unknown_surroundings_assume_continuation_in_the_same_window(self):
+        self.assertEqual(self._daemon(before=None, continuing=7).session.prefix, " ")
+        self.assertEqual(self._daemon(before=None, continuing=8).session.prefix, "")
+        self.assertEqual(self._daemon(before=None, continuing=None).session.prefix, "")
+
+    def test_punctuation_joins_without_a_space(self):
+        self.assertEqual(daemon_mod.spaced(" ", ", however"), ", however")
+        self.assertEqual(daemon_mod.spaced(" ", "next"), " next")
+        self.assertEqual(daemon_mod.spaced("", "next"), "next")
+
+    @patch("voicekey.daemon.notify")
+    @patch("voicekey.daemon.focus.window_id", return_value=7)
+    @patch("voicekey.daemon.time.monotonic", return_value=2.0)
+    def test_insertion_remembers_the_window_unless_text_ends_in_whitespace(self, _clock, _focus, _notify):
+        daemon = Daemon(Config())
+        daemon._deliver_dictation(_job("dictate", ImePreview(FakeIme(), 1), 7), "Hello.")
+        self.assertEqual(daemon._continuing, 7)
+        daemon._deliver_dictation(_job("dictate", ImePreview(FakeIme(), 1), 7), "Hello.\n")
+        self.assertIsNone(daemon._continuing)
+        with patch("voicekey.daemon.inject_mod.copy"):
+            preview = ImePreview(FakeIme(), 1)
+            preview.ime.commit_result = False
+            daemon._continuing = 7
+            daemon._deliver_dictation(_job("dictate", preview, 7), "Hello.")
+        self.assertIsNone(daemon._continuing, "a copy is not a continuation")
 
 
 class BindingsTests(unittest.TestCase):
