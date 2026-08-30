@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import tempfile
 import threading
 import time
 import unittest
@@ -10,6 +12,8 @@ import numpy as np
 from voicekey import daemon as daemon_mod
 from voicekey.config import Config
 from voicekey.daemon import Daemon, ImePreview, Job, NotifyPreview, Session, Spacing
+from voicekey.emacs import EmacsError, EmacsTimeout, Pin
+from voicekey.gate import Gate
 from voicekey.ime import ImeHung
 from voicekey.focus import Focus
 
@@ -97,8 +101,16 @@ def _dictate_code(daemon):
     )))
 
 
+def _no_real_recovery_file(test: unittest.TestCase) -> None:
+    """Every copy saves a transcript; tests must not touch the real one."""
+    saver = patch("voicekey.daemon.recovery.save", return_value="/secure/path")
+    saver.start()
+    test.addCleanup(saver.stop)
+
+
 class DeliveryTests(unittest.TestCase):
     def setUp(self):
+        _no_real_recovery_file(self)
         self.daemon = Daemon(Config())
         self.daemon.backend = Mock()
         self.daemon.backend.transcribe.return_value = "hello"
@@ -120,10 +132,23 @@ class DeliveryTests(unittest.TestCase):
     @patch("voicekey.daemon.inject_mod.type_text")
     @patch("voicekey.daemon.focus.window_id", return_value=8)
     @patch("voicekey.daemon.time.monotonic", return_value=2.0)
-    def test_focus_change_is_copied(self, _clock, _focus, type_text, copy, _notify):
-        self.daemon._deliver_dictation(_job("dictate", window_id=7), "hello")
+    def test_focus_change_is_copied_and_saved(self, _clock, _focus, type_text, copy, notify):
+        with patch("voicekey.daemon.recovery.save", return_value="/secure/path") as save:
+            self.daemon._deliver_dictation(_job("dictate", window_id=7), "hello")
         copy.assert_called_once_with("hello")
         type_text.assert_not_called()
+        save.assert_called_once_with("hello")  # an agent's wl-copy could clobber the clipboard
+        self.assertIn("/secure/path", notify.call_args.args[1])
+
+    @patch("voicekey.daemon.notify")
+    @patch("voicekey.daemon.inject_mod.copy")
+    @patch("voicekey.daemon.focus.window_id", return_value=8)
+    @patch("voicekey.daemon.time.monotonic", return_value=2.0)
+    def test_a_copy_survives_a_failed_recovery_save(self, _clock, _focus, copy, notify):
+        with patch("voicekey.daemon.recovery.save", side_effect=OSError("read-only fs")):
+            self.daemon._deliver_dictation(_job("dictate", window_id=7), "hello")
+        copy.assert_called_once_with("hello")
+        self.assertIn("recovery also failed", notify.call_args.args[1])
 
     @patch("voicekey.daemon.notify")
     @patch("voicekey.daemon.inject_mod.type_text")
@@ -263,6 +288,39 @@ class SessionTests(unittest.TestCase):
         daemon._start("/dev/input/event3", frozenset(), "hold", "agent", "release")
         self.assertIsInstance(daemon.session.preview, NotifyPreview)
         self.assertEqual(daemon.ime.rebinds, 0)
+
+    @patch("voicekey.daemon.notify")
+    @patch("voicekey.daemon.emacs_mod.pin", return_value=Pin("pin-7", "."))
+    @_focused(app="emacs")
+    def test_emacs_buffer_is_pinned_at_key_down(self, _focus, pin, _notify):
+        daemon = Daemon(Config())
+        daemon.recorder = FakeRecorder()
+        daemon._start("/dev/input/event3", frozenset(), "hold", "dictate", "release")
+        pin.assert_called_once_with()
+        self.assertEqual((daemon.session.pin, daemon.session.before), ("pin-7", "."))
+        daemon._finish()
+        self.assertEqual(daemon.jobs.get_nowait().pin, "pin-7")
+
+    @patch("voicekey.daemon.notify")
+    @patch("voicekey.daemon.emacs_mod.pin", return_value=Pin("pin-8", "."))
+    @_focused(app="emacs")
+    def test_emacs_buffer_is_pinned_even_while_our_text_is_landing(self, _focus, pin, _notify):
+        daemon = Daemon(Config())
+        daemon.recorder = FakeRecorder()
+        daemon.spacing.queued(7)
+        daemon._start("/dev/input/event3", frozenset(), "hold", "dictate", "release")
+        self.assertEqual(daemon.session.pin, "pin-8")
+        self.assertIsNone(daemon.session.before, "stale: the landing text changes it")
+
+    @patch("voicekey.daemon.notify")
+    @patch("voicekey.daemon.emacs_mod.pin")
+    @_focused()
+    def test_other_applications_pin_nothing(self, _focus, pin, _notify):
+        daemon = Daemon(Config())
+        daemon.recorder = FakeRecorder()
+        daemon._start("/dev/input/event3", frozenset(), "hold", "dictate", "release")
+        pin.assert_not_called()
+        self.assertIsNone(daemon.session.pin)
 
     @patch("voicekey.daemon.notify")
     @_focused(window=None, app=None)
@@ -507,12 +565,15 @@ class SpacingRuleTests(unittest.TestCase):
 
 
 class SpacingIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        _no_real_recovery_file(self)
+
     def _daemon(self, before=None, window=7, app="ghostty", landing=None, queued=None):
         daemon = Daemon(Config())
         daemon.recorder = FakeRecorder()
         daemon.ime = FakeIme(generation=1)
         daemon.ime.before_cursor = lambda: before
-        self._probe = patch("voicekey.daemon.emacs_mod.before_cursor", return_value=before)
+        self._probe = patch("voicekey.daemon.emacs_mod.pin", return_value=Pin("pin-1", before))
         self._probe.start()
         self.addCleanup(self._probe.stop)
         if landing is not None:
@@ -566,29 +627,76 @@ class SpacingIntegrationTests(unittest.TestCase):
 
     @patch("voicekey.daemon.notify")
     @patch("voicekey.daemon.emacs_mod.insert")
-    @patch("voicekey.daemon.focus.window_id", return_value=7)
     @patch("voicekey.daemon.time.monotonic", return_value=2.0)
-    def test_emacs_gets_the_text_through_emacsclient_not_the_ime(self, _clock, _focus, insert, _notify):
+    def test_emacs_gets_the_text_through_emacsclient_not_the_ime(self, _clock, insert, _notify):
         daemon = Daemon(Config())
         daemon.spacing.inserted(7, "First.", daemon.spacing.mark())
         ime = FakeIme()
-        job = Job(np.zeros(1), "dictate", 1.0, 7, ImePreview(ime, 1), "live", "emacs", ".", False)
+        job = Job(np.zeros(1), "dictate", 1.0, 7, ImePreview(ime, 1), "live", "emacs", ".", False, "pin-1")
         daemon._deliver_dictation(job, "Second.")
-        insert.assert_called_once_with(" Second.")
+        insert.assert_called_once_with(" Second.", "pin-1", timeout=9.0)
         self.assertEqual(ime.commits, [])
         self.assertEqual(ime.preedits, [("", 1)], "the preedit is cleared first")
 
     @patch("voicekey.daemon.notify")
     @patch("voicekey.daemon.inject_mod.copy")
-    @patch("voicekey.daemon.emacs_mod.insert", side_effect=daemon_mod.emacs_mod.EmacsError("buffer is read-only"))
-    @patch("voicekey.daemon.focus.window_id", return_value=7)
+    @patch("voicekey.daemon.emacs_mod.insert")
+    @patch("voicekey.daemon.focus.window_id", return_value=8)
     @patch("voicekey.daemon.time.monotonic", return_value=2.0)
-    def test_emacs_refusal_copies_with_the_reason(self, _clock, _focus, _insert, copy, notify):
+    def test_emacs_delivery_follows_the_pinned_buffer_not_focus(self, _clock, focus, insert, copy, notify):
+        # 2026-08-30: an agent's timer popped a dialog mid-dictation, focus
+        # moved, and the text was copied. The buffer was pinned at key-down,
+        # so focus is no reason to refuse.
         daemon = Daemon(Config())
-        job = Job(np.zeros(1), "dictate", 1.0, 7, ImePreview(FakeIme(), 1), "live", "emacs", None, False)
+        job = Job(np.zeros(1), "dictate", 1.0, 7, ImePreview(FakeIme(), 1), "live", "emacs", None, False, "pin-1")
         daemon._deliver_dictation(job, "Hello.")
+        insert.assert_called_once_with("Hello.", "pin-1", timeout=9.0)
+        copy.assert_not_called()
+        focus.assert_not_called()
+        self.assertEqual(notify.call_args.args[0], "✓ Typed")
+
+    @patch("voicekey.daemon.notify")
+    @patch("voicekey.daemon.emacs_mod.insert")
+    @patch("voicekey.daemon.time.monotonic", return_value=7.5)
+    def test_emacs_has_the_rest_of_the_delay_budget_to_answer(self, clock, insert, _notify):
+        daemon = Daemon(Config())
+        job = Job(np.zeros(1), "dictate", 1.0, 7, NotifyPreview("dictate"), "live", "emacs", None, False, "pin-1")
+        daemon._deliver_dictation(job, "Hello.")
+        self.assertEqual(insert.call_args.kwargs["timeout"], 3.5)
+        clock.return_value = 10.9  # nearly stale: still a second for a healthy Emacs
+        daemon._deliver_dictation(job, "Hello.")
+        self.assertEqual(insert.call_args.kwargs["timeout"], 1.0)
+
+    @patch("voicekey.daemon.notify")
+    @patch("voicekey.daemon.inject_mod.copy")
+    @patch("voicekey.daemon.emacs_mod.insert", side_effect=EmacsError("buffer is read-only"))
+    @patch("voicekey.daemon.time.monotonic", return_value=2.0)
+    def test_emacs_refusal_copies_with_the_reason(self, _clock, _insert, copy, notify):
+        daemon = Daemon(Config())
+        job = Job(np.zeros(1), "dictate", 1.0, 7, ImePreview(FakeIme(), 1), "live", "emacs", None, False, "pin-1")
+        with patch("voicekey.daemon.recovery.save", return_value="/secure/path"):
+            daemon._deliver_dictation(job, "Hello.")
         copy.assert_called_once_with("Hello.")
         self.assertIn("read-only", notify.call_args.args[1])
+        self.assertIn("/secure/path", notify.call_args.args[1])
+
+    @patch("voicekey.daemon.notify")
+    @patch("voicekey.daemon.inject_mod.copy")
+    @patch("voicekey.daemon.inject_mod.type_text")
+    @patch("voicekey.daemon.emacs_mod.insert", side_effect=EmacsTimeout("Emacs did not answer within 9s"))
+    @patch("voicekey.daemon.time.monotonic", return_value=2.0)
+    def test_a_blocked_emacs_saves_the_text_and_neither_types_nor_copies(
+            self, _clock, _insert, type_text, copy, notify):
+        # The form is queued in Emacs and runs once the dialog is dismissed,
+        # so a copy could be pasted on top of it.
+        daemon = Daemon(Config())
+        job = Job(np.zeros(1), "dictate", 1.0, 7, ImePreview(FakeIme(), 1), "live", "emacs", None, False, "pin-1")
+        with patch("voicekey.daemon.recovery.save", return_value="/secure/path") as save:
+            daemon._deliver_dictation(job, "Hello.")
+        save.assert_called_once_with("Hello.")
+        copy.assert_not_called()
+        type_text.assert_not_called()
+        self.assertIn("may still appear", notify.call_args.args[1])
 
     @patch("voicekey.daemon.notify")
     @patch("voicekey.daemon.inject_mod.copy")
@@ -617,6 +725,56 @@ class SpacingIntegrationTests(unittest.TestCase):
         with patch("voicekey.daemon.inject_mod.copy"):
             daemon._deliver_dictation(_job("dictate", preview, 7), "Hello.")
         self.assertEqual(daemon.spacing.owed(None, "ghostty", 7), " ")
+
+
+class AgentGateTests(unittest.TestCase):
+    def _daemon(self, **config):
+        daemon = Daemon(Config(**config))
+        daemon.recorder = FakeRecorder()
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        daemon.gate = Gate(os.path.join(directory.name, "lock"))
+        daemon.gate.open()
+        self.addCleanup(daemon.gate.close)
+        return daemon
+
+    @patch("voicekey.daemon.notify")
+    @_focused()
+    def test_lock_is_held_from_key_down_until_the_text_has_landed(self, _focus, _notify):
+        daemon = self._daemon()
+        daemon._start("/dev/input/event3", frozenset(), "hold", "dictate", "release")
+        self.assertTrue(daemon.gate.held)
+        daemon._finish()
+        self.assertTrue(daemon.gate.held, "the transcript is still on its way")
+        daemon.backend = Mock()
+        daemon.backend.transcribe.return_value = ""
+        threading.Thread(target=daemon._transcription_worker, daemon=True).start()
+        daemon.jobs.join()
+        deadline = time.monotonic() + 2
+        while daemon.gate.held and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertFalse(daemon.gate.held)
+
+    @patch("voicekey.daemon.notify")
+    @_focused()
+    def test_lock_is_released_when_nothing_will_land(self, _focus, _notify):
+        daemon = self._daemon()
+        daemon._start("/dev/input/event3", frozenset(), "hold", "dictate", "release")
+        daemon._abort("keyboard gone")
+        self.assertFalse(daemon.gate.held)
+        daemon = self._daemon(min_seconds=2.0)  # FakeRecorder records 1 s: a tap
+        daemon._start("/dev/input/event3", frozenset(), "hold", "dictate", "release")
+        self.assertTrue(daemon.gate.held)
+        daemon._finish()
+        self.assertFalse(daemon.gate.held)
+
+    @patch("voicekey.daemon.notify")
+    @_focused()
+    def test_the_gate_is_not_used_until_the_daemon_runs(self, _focus, _notify):
+        daemon = Daemon(Config())
+        daemon.recorder = FakeRecorder()
+        daemon._start("/dev/input/event3", frozenset(), "hold", "dictate", "release")
+        self.assertFalse(daemon.gate.held)
 
 
 class BindingsTests(unittest.TestCase):

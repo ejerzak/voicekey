@@ -16,7 +16,9 @@ transcript. Everything runs locally on the CPU; nothing leaves the machine.
 - **Never in the wrong place.** Text goes only into the field that was
   active when the key went down (captured within a few milliseconds of
   the press). If that field is gone by the time the final pass lands, the
-  transcript is copied to the clipboard and a notification says so.
+  transcript is copied to the clipboard and a notification says so. In
+  Emacs the buffer itself is pinned at key-down, so nothing that moves
+  focus in the meantime can redirect the text.
 - **Optional agent key.** A second key sends the transcript to a persistent
   [Hermes](https://hermes-agent.nousresearch.com) agent session instead.
 
@@ -94,12 +96,20 @@ cannot coexist with an IME such as fcitx — set `ime = false` to keep one.
 
 Emacs is a special case: committed text reaches an evil-mode buffer as
 keystrokes, so in normal or visual state it would become commands. When
-the focused window is Emacs, voicekey therefore inserts through
-`emacsclient` with the gesture of the current state — at point in insert
-state, after the cursor in normal state (`a`), in place of the selection in
-visual state (`c`), to the process in a terminal buffer — and refuses
-read-only buffers, blockwise selections and a pending operator by copying
-instead. The live preview is still the preedit; Emacs also reports the
+the focused window is Emacs, voicekey therefore pins the current buffer at
+key-down and, at delivery, asks Emacs through `emacsclient` to insert into
+that buffer with the gesture of its state then — at point in insert state,
+after the cursor in normal state (`a`), in place of the selection in visual
+state (`c`), to the process in a terminal buffer. Focus is not checked: an
+agent's `emacsclient`, a dialog or another frame may have moved it, and
+the text still lands where it was meant to, following point within that
+buffer but never following focus out of it. Emacs refuses, and voicekey
+copies instead, only when the buffer is gone or read-only, an operator is
+pending or the selection is blockwise. If Emacs cannot answer within what
+is left of `max_delay_seconds` (a GTK dialog blocks its command loop), the
+transcript is saved for recovery rather than copied: the insertion still
+runs once the dialog is dismissed, and a paste on top of it would double
+the text. The live preview is still the preedit; Emacs also reports the
 character before point, so spacing there is exact.
 
 Spacing between dictations is automatic: a dictation that continues text
@@ -123,7 +133,7 @@ you (mouse clicks are not observed).
 | `[dictation] ime` | use the input method for preview and commit (default true) |
 | `[dictation] inject` | without an input method: `wtype` (type it) or `clipboard` (copy it and say so) |
 | `[dictation] max_delay_seconds` | older transcripts are copied, never typed late |
-| `[dictation] require_same_window` | copy instead of typing if the focused window changed |
+| `[dictation] require_same_window` | copy instead of typing if the focused window changed (Emacs is exempt: its buffer is pinned) |
 | `[agent]` | Hermes target, local or over SSH via Tailscale |
 
 `install.sh` downloads the models the config names and verifies their
@@ -152,8 +162,22 @@ systemctl --user stop voicekey                                       # frees the
 
 `--check` exits 0 when ready, 2 when no keyboard is readable, 3 when only
 the agent target is unavailable, 1 on a configuration, dependency or model
-failure. Undelivered transcripts are saved, mode 0600, at
-`~/.local/state/voicekey/last-recovery.txt`.
+failure. Every transcript that was not typed — copied to the clipboard
+instead, or undeliverable — is also saved, mode 0600, at
+`~/.local/state/voicekey/last-recovery.txt`, since the clipboard is one
+`wl-copy` away from being overwritten.
+
+## Agents
+
+Coding agents drive the same desktop — `emacsclient`, `wl-copy`, `wtype`,
+compositor actions — and one of them evaluating Lisp in Emacs mid-dictation
+can steal focus or the clipboard. From key-down until the text has landed,
+voicekey holds an exclusive `flock` on `$XDG_RUNTIME_DIR/voicekey/lock`. A
+hook that takes a shared lock before such tools run, waits a bounded time
+and then refuses with a reason keeps agents out of the way (for Claude Code
+and Codex: `ai/shared/hooks/voicekey-lock.sh` in the config repo). The lock
+is advisory, voicekey itself never waits for it, and it dies with the
+daemon, so nothing can wedge.
 
 ## Caveats
 
