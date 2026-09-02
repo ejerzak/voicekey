@@ -252,12 +252,23 @@ def _validate(cfg: Config) -> None:
                 f"agent.{name} must contain 1-48 letters, digits, '_' or '-'"
             )
         setattr(cfg.agent, name, value)
-    working_directory = os.path.abspath(
-        os.path.expanduser(
-            _string("agent.working_directory", cfg.agent.working_directory)
-        )
-    )
-    if working_directory == os.path.sep:
+    working_directory = _string("agent.working_directory", cfg.agent.working_directory)
+    if working_directory != working_directory.strip():
+        raise ConfigError("agent.working_directory may not begin or end with whitespace")
+    if cfg.agent.transport == "ssh-over-tailscale":
+        # Resolved on the remote host, where `~/` is the remote user's home;
+        # expanding it here would name this machine's.
+        working_directory = os.path.normpath(working_directory)
+        if working_directory == "~":
+            raise ConfigError("agent.working_directory may not be a bare home")
+        if not (working_directory.startswith("~/") or os.path.isabs(working_directory)):
+            raise ConfigError(
+                "agent.working_directory must be absolute or start with ~/ "
+                "for ssh-over-tailscale"
+            )
+    else:
+        working_directory = os.path.abspath(os.path.expanduser(working_directory))
+    if not working_directory.strip(os.path.sep):  # "/", and "//", which normpath keeps
         raise ConfigError("agent.working_directory may not be the filesystem root")
     cfg.agent.working_directory = working_directory
     cfg.agent.terminal = _string("agent.terminal", cfg.agent.terminal)

@@ -190,6 +190,7 @@ class AgentDispatchTests(unittest.TestCase):
         self.assertIn("--title=Voicekey Hermes", argv)
         self.assertFalse(any(arg.startswith("--class=") for arg in argv))
 
+    @patch("voicekey.agent.focus.compositor", return_value="niri")
     @patch("voicekey.agent._require", return_value="/usr/bin/niri")
     @patch(
         "voicekey.agent._run",
@@ -198,9 +199,47 @@ class AgentDispatchTests(unittest.TestCase):
             '"title":"Voicekey Hermes"}]'
         ),
     )
-    def test_remote_terminal_window_is_identified_by_title(self, run, require):
+    def test_remote_terminal_window_is_identified_by_title(self, run, require, compositor):
         cfg = AgentConfig(terminal_title="Voicekey Hermes")
         self.assertTrue(agent._terminal_window_open(cfg))
+
+    @patch("voicekey.agent._session_has_client", return_value=True)
+    @patch("voicekey.agent.focus.compositor", return_value="sway")
+    def test_without_niri_the_terminal_check_falls_back_to_tmux_clients(self, compositor, clients):
+        self.assertTrue(agent._terminal_window_open(AgentConfig()))
+
+    @patch("voicekey.agent._terminal_window_open")
+    @patch("voicekey.agent._run")
+    def test_no_terminal_wanted_means_no_compositor_query(self, run, window_open):
+        cfg = AgentConfig(
+            transport="ssh-over-tailscale",
+            remote_host="desktop",
+            remote_user="alice",
+            identity_file="/home/alice/.ssh/id_ed25519",
+            open_terminal=False,
+        )
+        self.assertFalse(agent._ensure_terminal(cfg))
+        window_open.assert_not_called()
+        run.assert_not_called()
+
+    @patch(
+        "voicekey.agent._target_run",
+        return_value=completed(stdout="/home/alice/.local/share/voicekey/hermes\n"),
+    )
+    def test_remote_workspace_resolves_home_on_the_remote_host(self, target_run):
+        cfg = AgentConfig(
+            transport="ssh-over-tailscale",
+            remote_host="desktop",
+            remote_user="alice",
+            identity_file="/home/alice/.ssh/id_ed25519",
+            working_directory="~/.local/share/voicekey/hermes",
+        )
+        self.assertEqual(agent._workspace(cfg), "/home/alice/.local/share/voicekey/hermes")
+        argv = target_run.call_args.args[1]
+        self.assertEqual(argv[:2], ["sh", "-c"])
+        self.assertIn('"$HOME/$1"', argv[2])
+        self.assertEqual(argv[-1], ".local/share/voicekey/hermes")
+        self.assertNotIn("/home/", " ".join(argv), "no local path reaches the remote")
 
     @patch("voicekey.agent._require", return_value="/opt/hermes")
     @patch("voicekey.agent._workspace", return_value="/work")

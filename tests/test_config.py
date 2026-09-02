@@ -54,6 +54,25 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "agent.remote_host"):
             self._load_text('[agent]\ntransport = "ssh-over-tailscale"\n')
 
+    def test_remote_working_directory_is_resolved_on_the_remote_host(self):
+        remote = ('[agent]\ntransport = "ssh-over-tailscale"\nremote_host = "desktop"\n'
+                  'remote_user = "alice"\nidentity_file = "~/.ssh/id_ed25519"\n')
+        cfg = self._load_text(remote)
+        self.assertEqual(cfg.agent.working_directory, "~/.local/share/voicekey/hermes",
+                         "not expanded here: that would be this machine's home")
+        cfg = self._load_text(remote + 'working_directory = "/srv/hermes/"\n')
+        self.assertEqual(cfg.agent.working_directory, "/srv/hermes")
+        with self.assertRaisesRegex(ConfigError, "absolute or start with ~/"):
+            self._load_text(remote + 'working_directory = "hermes"\n')
+        with self.assertRaisesRegex(ConfigError, "bare home"):
+            self._load_text(remote + 'working_directory = "~/"\n')
+        with self.assertRaisesRegex(ConfigError, "filesystem root"):
+            self._load_text(remote + 'working_directory = "//"\n')  # normpath keeps "//"
+        with self.assertRaisesRegex(ConfigError, "whitespace"):
+            self._load_text(remote + 'working_directory = "/srv/hermes "\n')
+        self.assertTrue(os.path.isabs(self._load_text("").agent.working_directory),
+                        "local: expanded as before")
+
     def test_remote_fields_are_rejected_for_local_transport(self):
         with self.assertRaisesRegex(ConfigError, "require agent.transport"):
             self._load_text('[agent]\nremote_host = "desktop.example"\n')

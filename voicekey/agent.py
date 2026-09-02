@@ -17,6 +17,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from . import focus
 from .config import AgentConfig
 
 log = logging.getLogger("voicekey.agent")
@@ -249,24 +250,31 @@ def _ensure_server(cfg: AgentConfig) -> None:
         _start_server(cfg)
 
 
-def _workspace(cfg: AgentConfig) -> str:
-    path = Path(cfg.working_directory)
-    if _remote(cfg):
-        created = _target_run(
-            cfg, ["mkdir", "-p", "--", str(path)], check=False
+def _remote_workspace(cfg: AgentConfig) -> str:
+    """Create the working directory on the remote host and return its
+    absolute path there. A `~/` path is the remote user's home, resolved by
+    the remote shell; a local expansion would name this machine's home."""
+    if cfg.working_directory.startswith("~/"):
+        script = 'd="$HOME/$1" && mkdir -p -- "$d" && test -d "$d" && printf %s "$d"'
+        argument = cfg.working_directory[2:]
+    else:
+        script = 'mkdir -p -- "$1" && test -d "$1" && printf %s "$1"'
+        argument = cfg.working_directory
+    result = _target_run(cfg, ["sh", "-c", script, "voicekey", argument], check=False)
+    path = result.stdout.strip()
+    if result.returncode != 0 or not path.startswith("/"):
+        detail = (result.stderr or result.stdout).strip()[-500:]
+        raise AgentError(
+            f"cannot create remote Hermes working directory {cfg.working_directory}: "
+            f"{detail or 'no output'}"
         )
-        if created.returncode != 0:
-            detail = (created.stderr or created.stdout).strip()[-500:]
-            raise AgentError(
-                f"cannot create remote Hermes working directory {path}: "
-                f"{detail or 'no output'}"
-            )
-        exists = _target_run(cfg, ["test", "-d", str(path)], check=False)
-        if exists.returncode != 0:
-            raise AgentError(
-                f"remote Hermes working directory is not a directory: {path}"
-            )
-        return str(path)
+    return path
+
+
+def _workspace(cfg: AgentConfig) -> str:
+    if _remote(cfg):
+        return _remote_workspace(cfg)
+    path = Path(cfg.working_directory)
     try:
         path.mkdir(mode=0o700, parents=True, exist_ok=True)
     except OSError as exc:
@@ -324,14 +332,14 @@ def _ensure_session(cfg: AgentConfig) -> bool:
 def _ensure_terminal(cfg: AgentConfig) -> bool:
     """Open one local Ghostty attached to the configured Hermes session."""
     target = _session_target(cfg)
+    if not cfg.open_terminal:
+        return False  # nothing to open, so nothing to ask the compositor
     if _remote(cfg):
         if _terminal_window_open(cfg):
             return False
     elif _session_has_client(cfg):
         return False
 
-    if not cfg.open_terminal:
-        return False
     if cfg.terminal != "ghostty":
         raise AgentError(f"unsupported agent terminal: {cfg.terminal}")
 
@@ -401,7 +409,12 @@ def _ensure_terminal(cfg: AgentConfig) -> bool:
 
 
 def _terminal_window_open(cfg: AgentConfig) -> bool:
-    """Check the local compositor, not remote tmux's possibly-desktop clients."""
+    """Whether the terminal attached to the remote session is open, asked of
+    the local compositor rather than of remote tmux, whose clients may sit
+    on other machines. niri lists windows with titles; elsewhere the tmux
+    client count is the best available answer."""
+    if focus.compositor() != "niri":
+        return _session_has_client(cfg)
     result = _run(
         [_require("niri"), "msg", "--json", "windows"],
         timeout=cfg.command_timeout,
