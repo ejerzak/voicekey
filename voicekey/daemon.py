@@ -9,9 +9,13 @@ at key-down is gone by then, the text is copied to the clipboard instead —
 never typed somewhere else. Emacs needs no focus for that: its buffer is
 pinned at key-down and the text goes into it through emacsclient, whatever
 is focused by then. While anything is in flight, a lock in the runtime
-directory tells agents to keep their hands off the desktop. Agent prompts
-share the pipeline up to transcription, then go to Hermes through their own
-queue and worker, so a busy agent never delays dictation."""
+directory tells agents to keep their hands off the desktop. Transcription
+and delivery are separate workers, so a slow Emacs, a hung clipboard or a
+long wtype never delays the next recording's transcription (on 2026-08-30
+one hung wl-copy made the six dictations behind it late, and each was
+copied and hung in turn). Agent prompts share the pipeline up to
+transcription, then go to Hermes through their own queue and worker, so a
+busy agent never delays dictation."""
 
 from __future__ import annotations
 
@@ -23,7 +27,7 @@ import sys
 import threading
 import time
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 from evdev import ecodes
@@ -51,6 +55,7 @@ AGENT_QUEUE_SIZE = 8
 PREVIEW_INTERVAL = 0.25  # seconds between notification updates
 ACTIVATION_WAIT = 0.2  # seconds to wait for the focused field after binding
 OVERLOAD_FRAMES = 30  # 3 s of audio the live recognizer may fall behind
+PIN_WAIT = 0.1  # seconds the preview waits for an idle Emacs to report the character before point
 
 
 def _keycode(name: str) -> int:
@@ -68,7 +73,8 @@ def fix_environment() -> None:
     """Fill session variables commonly absent from a systemd user service."""
     if not os.environ.get("WAYLAND_DISPLAY"):
         runtime = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
-        sockets = sorted(glob.glob(os.path.join(runtime, "wayland-*")))
+        sockets = sorted(path for path in glob.glob(os.path.join(runtime, "wayland-*"))
+                         if not path.endswith(".lock"))
         if sockets:
             os.environ["WAYLAND_DISPLAY"] = os.path.basename(sockets[0])
             log.info("WAYLAND_DISPLAY not set; using %s", os.environ["WAYLAND_DISPLAY"])
@@ -149,6 +155,7 @@ class Spacing:
         self._continuing: int | str | None = None  # window voicekey typed into last
         self._activity = 0  # keystrokes seen; guards inserted() against a race
         self._landing: Counter = Counter()  # dictations queued per window, undelivered
+        self._inserts: Counter = Counter()  # dictations landed per window, ever
 
     def queued(self, window_id) -> None:
         with self._lock:
@@ -168,10 +175,22 @@ class Spacing:
             return " "  # our own text is about to land there
         return self.owed(before, app_id, window_id)
 
+    def inserts_in(self, window_id) -> int:
+        """Take at key-down, before the character before the cursor is
+        read; settle() compares it to tell whether our own text landed in
+        this window in the meantime."""
+        with self._lock:
+            return self._inserts[window_id]
+
     def settle(self, job: Job) -> str:
-        """At delivery: whatever was landing has landed by now."""
-        before = None if job.after_landing else job.before
-        return self.owed(before, job.app_id, job.window_id)
+        """At delivery. If one of our dictations landed in this window since
+        key-down, the character read then is stale and continuation
+        decides; otherwise the field's own report still holds — a first
+        dictation that landed nowhere (no speech, copied, refused) changed
+        nothing."""
+        with self._lock:
+            landed = self._inserts[job.window_id] > job.inserts_mark
+        return self.owed(None if landed else job.before, job.app_id, job.window_id)
 
     def owed(self, before: str | None, app_id: str | None, window_id) -> str:
         if before is not None and not (before == "" and app_id in self.UNTRUSTED):
@@ -185,6 +204,7 @@ class Spacing:
 
     def inserted(self, window_id, text: str, mark: int) -> None:
         with self._lock:
+            self._inserts[window_id] += 1
             if self._activity != mark:
                 return  # the user typed meanwhile and owns the spacing now
             self._continuing = None if text[-1:].isspace() else window_id
@@ -214,8 +234,10 @@ class Session:
         # Spacing inputs, captured at key-down; see Spacing.
         self.before: str | None = None  # character before the cursor, if reported
         self.after_landing = False  # our own text was still landing in this window
+        self.inserts_mark = 0  # our landings in this window at key-down; see Spacing.settle
         self.prefix = ""  # space shown in the preview; settled again at delivery
         self.pin: str | None = None  # the Emacs buffer pinned at key-down; see emacs.py
+        self.pinning: emacs_mod.PendingPin | None = None  # the pin round trip, still in flight
         self.text = ""
         self.decoder: threading.Thread | None = None
         self._stream = None
@@ -312,8 +334,9 @@ class Job:
     live_text: str
     app_id: str | None = None
     before: str | None = None
-    after_landing: bool = False
     pin: str | None = None
+    pinning: emacs_mod.PendingPin | None = None
+    inserts_mark: int = 0
 
 
 class Daemon:
@@ -335,6 +358,7 @@ class Daemon:
         self.streaming = None
         self.ime: InputMethod | None = None
         self.jobs: queue.Queue[Job] = queue.Queue(maxsize=TRANSCRIPTION_QUEUE_SIZE)
+        self.deliveries: queue.Queue[tuple[Job, str]] = queue.Queue()  # transcribed, not yet landed
         self.agent_prompts: queue.Queue[str] = queue.Queue(maxsize=AGENT_QUEUE_SIZE)
         self.spacing = Spacing()
         self.gate = Gate()  # held while anything is in flight; agents wait on it
@@ -371,6 +395,7 @@ class Daemon:
 
     def start_workers(self) -> None:
         for name, target in (("transcription", self._transcription_worker),
+                             ("delivery", self._delivery_worker),
                              ("agent-dispatch", self._agent_worker)):
             threading.Thread(target=target, daemon=True, name=name).start()
 
@@ -415,6 +440,7 @@ class Daemon:
         if self.session is not None:
             self._finish()
         self.jobs.join()
+        self.deliveries.join()
         if action == "agent":
             self.agent_prompts.join()
 
@@ -488,20 +514,23 @@ class Daemon:
             focused = focus.focused()
             session.window_id, session.app_id = focused.id, focused.app_id
             session.after_landing = self.spacing.landing_in(session.window_id)
+            # Before the character before the cursor is read, so a landing
+            # that changes it is known at delivery (Spacing.settle).
+            session.inserts_mark = self.spacing.inserts_in(session.window_id)
         # In-field text needs a real focused window: a lock screen or launcher
         # can activate the input method too, and text must never land there.
         if generation is not None and (
                 session.window_id is not None or not self.cfg.dictation.require_same_window):
             session.preview = ImePreview(self.ime, generation)
-            if not session.after_landing:  # else stale: the landing text changes it
-                session.before = self.ime.before_cursor()
+            session.before = self.ime.before_cursor()
         if dictate and session.app_id == "emacs":
-            # The buffer itself, before focus can move; and the character
-            # before point, exact, since Emacs tells the IME nothing.
-            pinned = emacs_mod.pin()
-            session.pin = pinned.id
-            if not session.after_landing:
-                session.before = pinned.before
+            # The buffer itself, before focus can move, on a helper thread so
+            # a busy Emacs never holds up the keyboard; and the character
+            # before point, exact, since Emacs tells the IME nothing — for
+            # the preview when it arrives at once, else settled at delivery.
+            session.pinning = emacs_mod.PendingPin()
+            session.pin = session.pinning.id
+            session.before = session.pinning.before(PIN_WAIT)
         if self.streaming is not None:
             if self._stuck is not None and self._stuck.is_alive():
                 log.warning("a previous live decoder is still running; no preview")
@@ -519,7 +548,7 @@ class Daemon:
         client touches the input method — unless a previous dictation is
         still landing: a rebind would cancel its ticket, and a binding that
         was live a second ago is trusted instead."""
-        if self.jobs.unfinished_tasks == 0 and not self.ime.rebind():
+        if not self._landing() and not self.ime.rebind():
             return None
         deadline = time.monotonic() + ACTIVATION_WAIT
         while (generation := self.ime.activation()) is None and time.monotonic() < deadline:
@@ -551,7 +580,7 @@ class Daemon:
         self._note_stuck(session)
         job = Job(samples, session.action, time.monotonic(), session.window_id,
                   session.preview, session.text, session.app_id, session.before,
-                  session.after_landing, session.pin)
+                  session.pin, session.pinning, session.inserts_mark)
         if job.action == "dictate":
             self.spacing.queued(job.window_id)  # before the worker can deliver it
         try:
@@ -581,7 +610,11 @@ class Daemon:
 
     def _settle_gate(self) -> None:
         """After every transition: agents wait while anything is in flight."""
-        self.gate.settle(lambda: self.session is not None or self.jobs.unfinished_tasks > 0)
+        self.gate.settle(lambda: self.session is not None or self._landing())
+
+    def _landing(self) -> bool:
+        """Some recording is still being transcribed or delivered."""
+        return self.jobs.unfinished_tasks > 0 or self.deliveries.unfinished_tasks > 0
 
     def _on_device_lost(self, device: str) -> None:
         self.pressed.pop(device, None)
@@ -590,31 +623,39 @@ class Daemon:
 
     def _on_tick(self) -> None:
         if self.session is not None and self.recorder.elapsed > self.cfg.max_seconds:
-            self._abort(f"recording discarded: exceeded {self.cfg.max_seconds:.0f}s — stuck key?")
+            # A stuck key cannot be told from a long thought until release,
+            # so the recording is stopped and transcribed, never discarded.
+            log.warning("recording stopped at %.0fs (stuck key?)", self.cfg.max_seconds)
+            notify("voicekey", f"recording stopped at {self.cfg.max_seconds:.0f}s (stuck key?); "
+                   "transcribing what was said", ms=10000)
+            self._finish()
 
     # --- workers ---
 
     def _transcription_worker(self) -> None:
         while True:
             job = self.jobs.get()
+            handed_over = False
             try:
-                self._process(job)
+                handed_over = self._process(job)
             except Exception as exc:
                 log.exception("transcription failed")
                 job.preview.clear()
                 notify("voicekey: error", f"{type(exc).__name__}: {exc}", error=True)
             finally:
-                if job.action == "dictate":
+                if job.action == "dictate" and not handed_over:
                     self.spacing.landed(job.window_id)
                 self.jobs.task_done()
                 self._settle_gate()
 
-    def _process(self, job: Job) -> None:
+    def _process(self, job: Job) -> bool:
+        """Transcribe JOB and pass the text on. True when a dictation went to
+        the delivery worker, which then owns its landing."""
         if self.backend is None:
             job.preview.clear()
             notify("voicekey: transcription unavailable",
                    self.backend_error or "no backend", error=True)
-            return
+            return False
         notify("⋯ Transcribing", ms=30000, channel=job.action)
         text = self.backend.transcribe(job.samples)
         if self.cfg.recordings_dir:
@@ -625,18 +666,36 @@ class Daemon:
         if not text:
             job.preview.clear()
             notify("voicekey", "no speech detected", channel=job.action)
-            return
+            return False
         log.info("transcribed %s prompt (%d chars)", job.action, len(text))
         if job.action == "dictate":
-            self._deliver_dictation(job, text)
-            return
+            self.deliveries.put((job, text))  # before task_done: the gate must see no gap
+            return True
         job.preview.clear()
         try:
             self.agent_prompts.put_nowait(text)
         except queue.Full:
             self._delivery_failed("voicekey: agent busy", "too many agent prompts queued", text)
-            return
+            return False
         notify("→ Agent", "prompt queued", ms=10000, channel="agent")
+        return False
+
+    def _delivery_worker(self) -> None:
+        """Landing on its own thread: a slow Emacs, a hung wl-copy or a long
+        wtype delays only the deliveries behind it, never a transcription."""
+        while True:
+            job, text = self.deliveries.get()
+            try:
+                self._deliver_dictation(job, text)
+            except Exception as exc:
+                log.exception("delivery failed")
+                job.preview.clear()
+                self._delivery_failed("voicekey: delivery failed",
+                                      f"{type(exc).__name__}: {exc}", text)
+            finally:
+                self.spacing.landed(job.window_id)
+                self.deliveries.task_done()
+                self._settle_gate()
 
     def _deliver_dictation(self, job: Job, text: str) -> None:
         age = time.monotonic() - job.finished_at
@@ -644,8 +703,6 @@ class Daemon:
             job.preview.clear()
             self._copy_instead(text, f"dictation was {age:.1f}s old; copied instead of typing")
             return
-        prefix = self.spacing.settle(job)
-        mark = self.spacing.mark()
         if job.app_id == "emacs":
             # Into the buffer pinned at key-down, through Emacs itself and
             # with the gesture of its current state — wherever focus went
@@ -653,9 +710,23 @@ class Daemon:
             # mid-operator or blockwise selected. It has the rest of the
             # delay budget to answer, since a dialog can hold it up.
             job.preview.clear()
-            budget = max(1.0, self.cfg.dictation.max_delay_seconds - age)
+            if job.pinning is not None:
+                # The pin must be registered before the insert is sent, and
+                # its report of the character before point is wanted if it
+                # was not in by key-down. Emacs has the rest of the delay
+                # budget for that; a transcript that goes stale waiting is
+                # copied like any other, never inserted late.
+                before = job.pinning.before(self._budget(job))
+                if job.before is None:
+                    job = replace(job, before=before)
+                age = time.monotonic() - job.finished_at
+                if age > self.cfg.dictation.max_delay_seconds:
+                    self._copy_instead(text, f"dictation was {age:.1f}s old; copied instead of typing")
+                    return
+            prefix = self.spacing.settle(job)
+            mark = self.spacing.mark()
             try:
-                emacs_mod.insert(spaced(prefix, text), job.pin or "", timeout=budget)
+                emacs_mod.insert(spaced(prefix, text), job.pin or "", timeout=self._budget(job))
             except emacs_mod.EmacsTimeout as exc:
                 # The form still runs when Emacs is free again, so neither
                 # type nor copy it: keep it where nothing can duplicate.
@@ -668,6 +739,8 @@ class Daemon:
             log.info("inserted via emacsclient")
             self._inserted(job, text, mark)
             return
+        prefix = self.spacing.settle(job)
+        mark = self.spacing.mark()
         if isinstance(job.preview, ImePreview):
             job.preview.prefix = prefix
             try:
@@ -698,6 +771,11 @@ class Daemon:
             self._inserted(job, text, mark)
             return
         self._copy_instead(text, "", summary="📋 Copied")
+
+    def _budget(self, job: Job) -> float:
+        """What is left of the delay budget, and at least a second for a
+        healthy Emacs to answer."""
+        return max(1.0, self.cfg.dictation.max_delay_seconds - (time.monotonic() - job.finished_at))
 
     def _inserted(self, job: Job, text: str, mark: int) -> None:
         self.spacing.inserted(job.window_id, text, mark)

@@ -65,6 +65,7 @@ def check(cfg) -> int:
     the agent target is unavailable, 1 for a config, dependency or model failure."""
     from evdev import InputDevice, ecodes
 
+    from . import focus
     from .backends import BackendUnavailable, create_backend, create_streaming
     from .config import key_chord_names
     from .daemon import fix_environment
@@ -93,12 +94,23 @@ def check(cfg) -> int:
     if cfg.agent.transport == "ssh-over-tailscale":
         print(f"agent remote: {cfg.agent.remote_user}@{cfg.agent.remote_host}")
 
-    required = {"niri", "notify-send", "pw-record", "wl-copy"}
+    required = {"notify-send", "pw-record", "wl-copy"}
     if cfg.dictation.inject == "wtype":
         required.add("wtype")
+    compositor = focus.compositor()
+    focus_tool = {"niri": "niri", "sway": "swaymsg", "hyprland": "hyprctl"}.get(compositor)
+    if focus_tool:
+        print(f"compositor: {compositor}")
+        required.add(focus_tool)
+    elif cfg.dictation.require_same_window:
+        print("WARNING: no niri, sway or Hyprland detected: the focused window cannot be "
+              "verified, so dictations will be copied, not typed — set "
+              "dictation.require_same_window = false", file=sys.stderr)
     agent_required = {"systemd-run"}
     if cfg.agent.transport == "ssh-over-tailscale":
-        agent_required.update({"niri", "ssh", "tailscale"})
+        agent_required.update({"ssh", "tailscale"})
+        if cfg.agent.open_terminal and focus_tool:
+            agent_required.add(focus_tool)  # the terminal window is found through the compositor
     else:
         agent_required.update({"hermes", "tmux"})
     if cfg.agent.open_terminal:

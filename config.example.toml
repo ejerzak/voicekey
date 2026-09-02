@@ -9,7 +9,7 @@ dictate_toggle_key = ""    # optional: first press starts, second press stops
 agent_toggle_key   = ""
 language    = "en"
 min_seconds = 0.3          # shorter recordings are accidental taps
-max_seconds = 90.0         # stuck-key safety: longer recordings are discarded
+max_seconds = 90.0         # stuck-key safety: a longer recording is stopped and transcribed
 recordings_dir = ""        # debug: keep wav + live/final transcripts of every recording
 
 [backend]                  # final pass over the whole recording
@@ -43,7 +43,7 @@ transport = "local"
 # identity_file = "~/.ssh/id_ed25519"
 tmux_socket = "voicekey-hermes"
 tmux_session = "voicekey-hermes"
-working_directory = "~/.local/share/voicekey/hermes"
+working_directory = "~/.local/share/voicekey/hermes"  # over ssh, ~/ is the remote user's home
 terminal = "ghostty"
 terminal_title = "Voicekey Hermes"
 open_terminal = true

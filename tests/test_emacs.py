@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -27,6 +28,11 @@ class PinTests(unittest.TestCase):
     def test_pin_newline(self, run):
         self.assertEqual(emacs.pin().before, "\n")
 
+    @patch("voicekey.emacs.subprocess.run", return_value=_run('"."\n'))
+    def test_pin_uses_the_id_it_is_given(self, run):
+        self.assertEqual(emacs.pin("given").id, "given")
+        self.assertIn('"given"', run.call_args.args[0][2])
+
     @patch("voicekey.emacs.subprocess.run", side_effect=OSError("no emacsclient"))
     def test_pin_without_emacs_still_names_the_buffer_it_would_have_pinned(self, run):
         pinned = emacs.pin()
@@ -41,7 +47,38 @@ class PinTests(unittest.TestCase):
         self.assertIsNone(emacs.pin().before)
 
 
+class PendingPinTests(unittest.TestCase):
+    def test_the_id_is_known_before_emacs_answers(self):
+        release = threading.Event()
+
+        def slow(argv, **kwargs):
+            release.wait(5)
+            return _run('"."\n')
+
+        with patch("voicekey.emacs.subprocess.run", side_effect=slow) as run:
+            pending = emacs.PendingPin()
+            self.assertTrue(pending.id)
+            self.assertIsNone(pending.before(0.05), "Emacs is busy; the preview goes without")
+            release.set()
+            self.assertEqual(pending.before(2.0), ".")
+        self.assertIn(f'"{pending.id}"', run.call_args.args[0][2])
+
+    @patch("voicekey.emacs.subprocess.run", side_effect=OSError("no emacsclient"))
+    def test_without_emacs_the_id_still_names_the_buffer(self, run):
+        pending = emacs.PendingPin()
+        self.assertIsNone(pending.before(2.0))
+        self.assertTrue(pending.id)
+
+
 class InsertTests(unittest.TestCase):
+    def test_normal_and_visual_state_end_in_normal_state_like_escape(self):
+        # Dictating in normal state is usually an accident; the buffer is
+        # left in the state it was found in, not in insert state.
+        self.assertIn("(evil-append 1) (insert text) (evil-normal-state)", emacs.INSERT)
+        visual = emacs.INSERT[emacs.INSERT.index("(eq state 'visual)"):emacs.INSERT.index("(eq state 'normal)")]
+        self.assertIn("(evil-normal-state)", visual)
+        self.assertIn("(t (insert text))", emacs.INSERT, "insert state stays insert")
+
     @patch("voicekey.emacs.subprocess.run", return_value=_run('"ok"\n'))
     def test_insert_goes_to_the_pinned_buffer_and_escapes_the_text_for_lisp(self, run):
         emacs.insert('say "hi" \\ bye', "abc123")

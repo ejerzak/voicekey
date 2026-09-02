@@ -23,17 +23,17 @@ class Focus:
 
 def focused() -> Focus:
     """The focused window, or an empty Focus when it cannot be queried."""
-    compositor = _compositor()
-    if compositor == "niri":
+    name = compositor()
+    if name == "niri":
         data = _json(["niri", "msg", "--json", "focused-window"])
         return _focus(data.get("id"), data.get("app_id")) if isinstance(data, dict) else Focus()
-    if compositor == "sway":
+    if name == "sway":
         node = _sway_focused(_json(["swaymsg", "-t", "get_tree"]))
         if node is None:
             return Focus()
         app_id = node.get("app_id") or (node.get("window_properties") or {}).get("class")
         return _focus(node.get("id"), app_id)
-    if compositor == "hyprland":
+    if name == "hyprland":
         data = _json(["hyprctl", "-j", "activewindow"])
         return _focus(data.get("address"), data.get("class")) if isinstance(data, dict) else Focus()
     return Focus()
@@ -43,7 +43,8 @@ def window_id() -> int | str | None:
     return focused().id
 
 
-def _compositor() -> str | None:
+def compositor() -> str | None:
+    """'niri', 'sway' or 'hyprland' when one is detected, else None."""
     for variable, name in (("NIRI_SOCKET", "niri"), ("SWAYSOCK", "sway"),
                            ("HYPRLAND_INSTANCE_SIGNATURE", "hyprland")):
         if os.environ.get(variable):

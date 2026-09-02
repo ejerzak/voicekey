@@ -28,6 +28,9 @@ transcript. Everything runs locally on the CPU; nothing leaves the machine.
   `zwp_input_method_v2`: niri, sway, Hyprland, river, labwc, Wayfire.
   The focused-window guard talks to niri, sway and Hyprland; on the others
   set `require_same_window = false` (the field-level guard still applies).
+  Only those three also tell voicekey which application is focused, which
+  the Emacs delivery below depends on: elsewhere Emacs gets the generic
+  commit, so dictate into it in insert state only.
   GNOME and KDE implement neither this nor the virtual-keyboard protocol;
   there voicekey could only copy to the clipboard, so it is not supported.
 - `uv` (installs Python 3.12 into a private venv), `gcc` (the evdev
@@ -100,10 +103,12 @@ the focused window is Emacs, voicekey therefore pins the current buffer at
 key-down and, at delivery, asks Emacs through `emacsclient` to insert into
 that buffer with the gesture of its state then — at point in insert state,
 after the cursor in normal state (`a`), in place of the selection in visual
-state (`c`), to the process in a terminal buffer. Focus is not checked: an
-agent's `emacsclient`, a dialog or another frame may have moved it, and
-the text still lands where it was meant to, following point within that
-buffer but never following focus out of it. Emacs refuses, and voicekey
+state (`c`), to the process in a terminal buffer — and leaves the state as
+it found it: normal and visual state end back in normal, as Escape would.
+Focus is not checked: an agent's `emacsclient`, a dialog or another frame
+may have moved it, and the text still lands where it was meant to,
+following point within that buffer but never following focus out of it.
+Emacs refuses, and voicekey
 copies instead, only when the buffer is gone or read-only, an operator is
 pending or the selection is blockwise. If Emacs cannot answer within what
 is left of `max_delay_seconds` (a GTK dialog blocks its command loop), the
@@ -126,7 +131,7 @@ you (mouse clicks are not observed).
 |---|---|
 | `dictate_key`, `agent_key` | evdev key names or chords to hold (`KEY_F9`, `KEY_RIGHTALT+KEY_F23`) |
 | `dictate_toggle_key`, `agent_toggle_key` | optional press-to-start, press-to-stop keys |
-| `min_seconds`, `max_seconds` | shorter recordings are taps and discarded; longer ones are aborted (stuck key) |
+| `min_seconds`, `max_seconds` | shorter recordings are taps and discarded; longer ones are stopped and transcribed (stuck key?) |
 | `recordings_dir` | keep the audio and both transcripts of every recording (off by default) |
 | `[backend]` | final pass: `parakeet` (CPU) or `faster-whisper` (CUDA), and its model |
 | `[streaming] model_dir` | live-preview model; `""` disables the preview |
@@ -162,7 +167,10 @@ systemctl --user stop voicekey                                       # frees the
 
 `--check` exits 0 when ready, 2 when no keyboard is readable, 3 when only
 the agent target is unavailable, 1 on a configuration, dependency or model
-failure. Every transcript that was not typed — copied to the clipboard
+failure. Transcription and delivery run on separate threads, so a slow
+Emacs or a hung clipboard delays only the deliveries behind it, never the
+transcription of the next recording; a clipboard copy is given three
+seconds. Every transcript that was not typed — copied to the clipboard
 instead, or undeliverable — is also saved, mode 0600, at
 `~/.local/state/voicekey/last-recovery.txt`, since the clipboard is one
 `wl-copy` away from being overwritten.

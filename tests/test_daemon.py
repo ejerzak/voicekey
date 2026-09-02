@@ -234,8 +234,72 @@ class DeliveryTests(unittest.TestCase):
     @patch("voicekey.daemon.time.monotonic", return_value=2.0)
     def test_recording_log_failure_does_not_lose_text(self, _clock, _focus, type_text, _keep, _notify):
         self.daemon.cfg.recordings_dir = "/nowhere"
-        self.daemon._process(_job("dictate", window_id=7))
+        self.assertTrue(self.daemon._process(_job("dictate", window_id=7)))
+        job, text = self.daemon.deliveries.get_nowait()
+        self.daemon._deliver_dictation(job, text)
         type_text.assert_called_once_with("hello")
+
+
+class WorkerTests(unittest.TestCase):
+    """Transcription and delivery are separate workers: on 2026-08-30 one
+    hung wl-copy (15 s) held the single worker, the six dictations behind
+    it aged past max_delay_seconds waiting to be transcribed, and each was
+    copied and hung in turn."""
+
+    def setUp(self):
+        _no_real_recovery_file(self)
+        self.daemon = Daemon(Config())
+        self.daemon.backend = Mock()
+        self.daemon.backend.transcribe.return_value = "hello"
+
+    def _run_workers(self, deliver):
+        with patch.object(self.daemon, "_deliver_dictation", side_effect=deliver):
+            threading.Thread(target=self.daemon._transcription_worker, daemon=True).start()
+            threading.Thread(target=self.daemon._delivery_worker, daemon=True).start()
+            self.daemon.jobs.join()
+            self.daemon.deliveries.join()
+
+    @patch("voicekey.daemon.notify")
+    def test_a_hung_delivery_does_not_delay_the_next_transcription(self, _notify):
+        delivering = threading.Event()
+        release = threading.Event()
+
+        def deliver(job, text):
+            delivering.set()
+            release.wait(5)
+
+        for _ in range(2):
+            self.daemon.spacing.queued(7)
+            self.daemon.jobs.put_nowait(_job("dictate", window_id=7))
+        with patch.object(self.daemon, "_deliver_dictation", side_effect=deliver):
+            threading.Thread(target=self.daemon._transcription_worker, daemon=True).start()
+            threading.Thread(target=self.daemon._delivery_worker, daemon=True).start()
+            self.assertTrue(delivering.wait(2))
+            self.daemon.jobs.join()  # the second recording is transcribed meanwhile
+            self.assertEqual(self.daemon.backend.transcribe.call_count, 2)
+            self.assertTrue(self.daemon.spacing.landing_in(7), "nothing has landed yet")
+            release.set()
+            self.daemon.deliveries.join()
+        self.assertFalse(self.daemon.spacing.landing_in(7))
+
+    @patch("voicekey.daemon.notify")
+    def test_a_delivery_that_blows_up_saves_the_text(self, _notify):
+        self.daemon.spacing.queued(7)
+        self.daemon.jobs.put_nowait(_job("dictate", window_id=7))
+        with patch("voicekey.daemon.recovery.save", return_value="/secure/path") as save:
+            self._run_workers(deliver=Mock(side_effect=RuntimeError("boom")))
+        save.assert_called_once_with("hello")
+        self.assertFalse(self.daemon.spacing.landing_in(7))
+
+    @patch("voicekey.daemon.notify")
+    def test_an_empty_transcript_lands_nowhere_and_says_so(self, _notify):
+        self.daemon.backend.transcribe.return_value = ""
+        self.daemon.spacing.queued(7)
+        self.daemon.jobs.put_nowait(_job("dictate", window_id=7))
+        deliver = Mock()
+        self._run_workers(deliver)
+        deliver.assert_not_called()
+        self.assertFalse(self.daemon.spacing.landing_in(7))
 
 
 class SessionTests(unittest.TestCase):
@@ -290,27 +354,59 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(daemon.ime.rebinds, 0)
 
     @patch("voicekey.daemon.notify")
-    @patch("voicekey.daemon.emacs_mod.pin", return_value=Pin("pin-7", "."))
+    @patch("voicekey.daemon.emacs_mod.pin", side_effect=lambda pin_id: Pin(pin_id, "."))
     @_focused(app="emacs")
     def test_emacs_buffer_is_pinned_at_key_down(self, _focus, pin, _notify):
         daemon = Daemon(Config())
         daemon.recorder = FakeRecorder()
         daemon._start("/dev/input/event3", frozenset(), "hold", "dictate", "release")
-        pin.assert_called_once_with()
-        self.assertEqual((daemon.session.pin, daemon.session.before), ("pin-7", "."))
+        self.assertTrue(daemon.session.pin)
+        pin.assert_called_once_with(daemon.session.pin)
+        self.assertEqual(daemon.session.before, ".", "an idle Emacs answers in time for the preview")
+        pin_id = daemon.session.pin
         daemon._finish()
-        self.assertEqual(daemon.jobs.get_nowait().pin, "pin-7")
+        self.assertEqual(daemon.jobs.get_nowait().pin, pin_id)
 
     @patch("voicekey.daemon.notify")
-    @patch("voicekey.daemon.emacs_mod.pin", return_value=Pin("pin-8", "."))
+    @patch("voicekey.daemon.emacs_mod.pin", side_effect=lambda pin_id: Pin(pin_id, "."))
     @_focused(app="emacs")
     def test_emacs_buffer_is_pinned_even_while_our_text_is_landing(self, _focus, pin, _notify):
         daemon = Daemon(Config())
         daemon.recorder = FakeRecorder()
         daemon.spacing.queued(7)
         daemon._start("/dev/input/event3", frozenset(), "hold", "dictate", "release")
-        self.assertEqual(daemon.session.pin, "pin-8")
-        self.assertIsNone(daemon.session.before, "stale: the landing text changes it")
+        self.assertTrue(daemon.session.pin)
+        self.assertEqual(daemon.session.before, ".", "read anyway; settle() knows if it goes stale")
+
+    @patch("voicekey.daemon.notify")
+    @_focused(app="emacs")
+    def test_a_busy_emacs_does_not_hold_up_the_key_down(self, _focus, _notify):
+        # A dialog or a long command blocks Emacs's command loop; the pin
+        # form is delivered and runs later, and the keyboard thread must
+        # not wait for it (it used to wait up to 5 s at every key-down).
+        release = threading.Event()
+
+        def slow_pin(pin_id):
+            release.wait(5)
+            return Pin(pin_id, ".")
+
+        daemon = Daemon(Config())
+        daemon.recorder = FakeRecorder()
+        with patch("voicekey.daemon.emacs_mod.pin", side_effect=slow_pin), \
+                patch.object(daemon_mod, "PIN_WAIT", 0.01):
+            started = time.monotonic()
+            daemon._start("/dev/input/event3", frozenset(), "hold", "dictate", "release")
+            self.assertLess(time.monotonic() - started, 1.0)
+            self.assertTrue(daemon.session.pin)
+            self.assertIsNone(daemon.session.before, "not known yet; settled at delivery")
+            daemon._finish()
+            job = daemon.jobs.get_nowait()
+            self.assertIsNotNone(job.pinning)
+            release.set()  # Emacs is free again before delivery
+            with patch("voicekey.daemon.emacs_mod.insert") as insert, \
+                    patch("voicekey.daemon.time.monotonic", return_value=job.finished_at + 1.0):
+                daemon._deliver_dictation(job, "Hello.")
+            insert.assert_called_once_with(" Hello.", job.pin, timeout=9.0)
 
     @patch("voicekey.daemon.notify")
     @patch("voicekey.daemon.emacs_mod.pin")
@@ -486,15 +582,25 @@ class SessionTests(unittest.TestCase):
 
     @patch("voicekey.daemon.notify")
     @_focused()
-    def test_stuck_key_aborts_and_clears_preview(self, _focus, _notify):
+    def test_recording_past_max_seconds_is_stopped_and_transcribed(self, _focus, notify):
+        # A stuck key cannot be told from a long thought until release, so
+        # the recording is delivered, not discarded (ten days of use: the
+        # longest recording was 68 s, 21 ran past 30 s).
         daemon = Daemon(Config(max_seconds=5))
         daemon.recorder = FakeRecorder()
         daemon.ime = FakeIme()
-        daemon._start("/dev/input/event3", frozenset(), "hold", "dictate", "release")
+        code = _dictate_code(daemon)
+        daemon._on_key("/dev/input/event3", code, 1)
         daemon.recorder.elapsed = 6.0
         daemon._on_tick()
         self.assertIsNone(daemon.session)
-        self.assertEqual(daemon.ime.preedits, [("", 1)])
+        self.assertFalse(daemon.recorder.active)
+        self.assertEqual(daemon.jobs.get_nowait().action, "dictate")
+        self.assertEqual(daemon.ime.preedits, [], "the preview stays until the text replaces it")
+        self.assertIn("stuck key", notify.call_args.args[1])
+        daemon._on_key("/dev/input/event3", code, 0)  # the eventual release is nothing now
+        self.assertIsNone(daemon.session)
+        self.assertEqual(daemon.recorder.stops, 1)
 
 
 class SpacingRuleTests(unittest.TestCase):
@@ -550,13 +656,26 @@ class SpacingRuleTests(unittest.TestCase):
         self.assertEqual(spacing.predict(7, "ghostty", "."), " ")
         self.assertEqual(spacing.predict(8, "ghostty", ""), "", "another window: not ours")
         job = Job(np.zeros(1), "dictate", 1.0, 7, NotifyPreview("dictate"), "live",
-                  "ghostty", ".", True)
-        self.assertEqual(spacing.settle(job), "", "the stale '.' is ignored; nothing landed")
+                  "ghostty", "", inserts_mark=spacing.inserts_in(7))
+        self.assertEqual(spacing.settle(job), "",
+                         "the first landed nowhere: the field's own report (empty) holds")
         spacing.inserted(7, "First.", spacing.mark())
-        self.assertEqual(spacing.settle(job), " ")
+        self.assertEqual(spacing.settle(job), " ", "ours landed after key-down: continuation")
+        spacing.user_typed()
+        self.assertEqual(spacing.settle(job), "", "and the user typed since: theirs to decide")
         job = Job(np.zeros(1), "dictate", 1.0, 7, NotifyPreview("dictate"), "live",
-                  "ghostty", "", False)
-        self.assertEqual(spacing.settle(job), "", "nothing was landing: the field's own report wins")
+                  "ghostty", ".", inserts_mark=spacing.inserts_in(7))
+        self.assertEqual(spacing.settle(job), " ", "nothing landed since: the field's '.' wins")
+
+    def test_a_first_dictation_that_lands_nowhere_keeps_the_field_report(self):
+        # Typed "Hello.", two quick dictations, the first with no speech: the
+        # second used to lose the "." it saw at key-down and join the text.
+        spacing = Spacing()
+        spacing.queued(7)
+        job = Job(np.zeros(1), "dictate", 1.0, 7, NotifyPreview("dictate"), "live",
+                  "ghostty", ".", inserts_mark=spacing.inserts_in(7))
+        spacing.landed(7)  # no speech detected
+        self.assertEqual(spacing.settle(job), " ")
 
     def test_punctuation_joins_without_a_space(self):
         self.assertEqual(daemon_mod.spaced(" ", ", however"), ", however")
@@ -608,7 +727,7 @@ class SpacingIntegrationTests(unittest.TestCase):
         daemon.jobs.get_nowait()
         daemon.spacing.inserted(7, "First.", daemon.spacing.mark())
         ime = FakeIme()
-        job = Job(np.zeros(1), "dictate", 1.0, 7, ImePreview(ime, 1), "live", "ghostty", ".", True)
+        job = Job(np.zeros(1), "dictate", 1.0, 7, ImePreview(ime, 1), "live", "ghostty", ".")
         with patch("voicekey.daemon.notify"), patch("voicekey.daemon.focus.window_id", return_value=7), \
                 patch("voicekey.daemon.time.monotonic", return_value=2.0):
             daemon._deliver_dictation(job, "Second.")
@@ -626,13 +745,59 @@ class SpacingIntegrationTests(unittest.TestCase):
         self.assertFalse(daemon.spacing.landing_in(7))
 
     @patch("voicekey.daemon.notify")
+    @_focused(app="emacs")
+    def test_delivery_waits_for_the_pin_even_when_our_text_was_landing(self, _focus, _notify):
+        # The insert is a second emacsclient; sent before the pin's has
+        # reached Emacs it would find "no pinned buffer".
+        release = threading.Event()
+
+        def slow_pin(pin_id):
+            release.wait(5)
+            return Pin(pin_id, ".")
+
+        daemon = Daemon(Config())
+        daemon.recorder = FakeRecorder()
+        daemon.spacing.queued(7)  # a dictation of ours is still landing
+        with patch("voicekey.daemon.emacs_mod.pin", side_effect=slow_pin), \
+                patch.object(daemon_mod, "PIN_WAIT", 0.01):
+            daemon._start("/dev/input/event3", frozenset(), "hold", "dictate", "release")
+            self.assertTrue(daemon.session.after_landing)
+            daemon._finish()
+            job = daemon.jobs.get_nowait()
+            inserted = threading.Event()
+            with patch("voicekey.daemon.emacs_mod.insert",
+                       side_effect=lambda *a, **k: inserted.set()) as insert, \
+                    patch("voicekey.daemon.time.monotonic", return_value=job.finished_at + 1.0):
+                threading.Thread(target=daemon._deliver_dictation, args=(job, "Hello."),
+                                 daemon=True).start()
+                self.assertFalse(inserted.wait(0.3), "not before Emacs has registered the pin")
+                release.set()
+                self.assertTrue(inserted.wait(2))
+            insert.assert_called_once()
+
+    @patch("voicekey.daemon.notify")
+    @patch("voicekey.daemon.inject_mod.copy")
+    @patch("voicekey.daemon.emacs_mod.insert")
+    def test_a_transcript_gone_stale_waiting_for_emacs_is_copied_not_inserted_late(
+            self, insert, copy, _notify):
+        daemon = Daemon(Config())
+        daemon.cfg.dictation.max_delay_seconds = 0.5
+        pinning = Mock()
+        pinning.before.side_effect = lambda wait: time.sleep(wait)  # Emacs never answers
+        job = Job(np.zeros(1), "dictate", time.monotonic(), 7, NotifyPreview("dictate"), "live",
+                  "emacs", None, "pin-1", pinning)
+        daemon._deliver_dictation(job, "Hello.")
+        insert.assert_not_called()
+        copy.assert_called_once_with("Hello.")
+
+    @patch("voicekey.daemon.notify")
     @patch("voicekey.daemon.emacs_mod.insert")
     @patch("voicekey.daemon.time.monotonic", return_value=2.0)
     def test_emacs_gets_the_text_through_emacsclient_not_the_ime(self, _clock, insert, _notify):
         daemon = Daemon(Config())
         daemon.spacing.inserted(7, "First.", daemon.spacing.mark())
         ime = FakeIme()
-        job = Job(np.zeros(1), "dictate", 1.0, 7, ImePreview(ime, 1), "live", "emacs", ".", False, "pin-1")
+        job = Job(np.zeros(1), "dictate", 1.0, 7, ImePreview(ime, 1), "live", "emacs", ".", "pin-1")
         daemon._deliver_dictation(job, "Second.")
         insert.assert_called_once_with(" Second.", "pin-1", timeout=9.0)
         self.assertEqual(ime.commits, [])
@@ -648,7 +813,7 @@ class SpacingIntegrationTests(unittest.TestCase):
         # moved, and the text was copied. The buffer was pinned at key-down,
         # so focus is no reason to refuse.
         daemon = Daemon(Config())
-        job = Job(np.zeros(1), "dictate", 1.0, 7, ImePreview(FakeIme(), 1), "live", "emacs", None, False, "pin-1")
+        job = Job(np.zeros(1), "dictate", 1.0, 7, ImePreview(FakeIme(), 1), "live", "emacs", None, "pin-1")
         daemon._deliver_dictation(job, "Hello.")
         insert.assert_called_once_with("Hello.", "pin-1", timeout=9.0)
         copy.assert_not_called()
@@ -660,7 +825,7 @@ class SpacingIntegrationTests(unittest.TestCase):
     @patch("voicekey.daemon.time.monotonic", return_value=7.5)
     def test_emacs_has_the_rest_of_the_delay_budget_to_answer(self, clock, insert, _notify):
         daemon = Daemon(Config())
-        job = Job(np.zeros(1), "dictate", 1.0, 7, NotifyPreview("dictate"), "live", "emacs", None, False, "pin-1")
+        job = Job(np.zeros(1), "dictate", 1.0, 7, NotifyPreview("dictate"), "live", "emacs", None, "pin-1")
         daemon._deliver_dictation(job, "Hello.")
         self.assertEqual(insert.call_args.kwargs["timeout"], 3.5)
         clock.return_value = 10.9  # nearly stale: still a second for a healthy Emacs
@@ -673,7 +838,7 @@ class SpacingIntegrationTests(unittest.TestCase):
     @patch("voicekey.daemon.time.monotonic", return_value=2.0)
     def test_emacs_refusal_copies_with_the_reason(self, _clock, _insert, copy, notify):
         daemon = Daemon(Config())
-        job = Job(np.zeros(1), "dictate", 1.0, 7, ImePreview(FakeIme(), 1), "live", "emacs", None, False, "pin-1")
+        job = Job(np.zeros(1), "dictate", 1.0, 7, ImePreview(FakeIme(), 1), "live", "emacs", None, "pin-1")
         with patch("voicekey.daemon.recovery.save", return_value="/secure/path"):
             daemon._deliver_dictation(job, "Hello.")
         copy.assert_called_once_with("Hello.")
@@ -690,7 +855,7 @@ class SpacingIntegrationTests(unittest.TestCase):
         # The form is queued in Emacs and runs once the dialog is dismissed,
         # so a copy could be pasted on top of it.
         daemon = Daemon(Config())
-        job = Job(np.zeros(1), "dictate", 1.0, 7, ImePreview(FakeIme(), 1), "live", "emacs", None, False, "pin-1")
+        job = Job(np.zeros(1), "dictate", 1.0, 7, ImePreview(FakeIme(), 1), "live", "emacs", None, "pin-1")
         with patch("voicekey.daemon.recovery.save", return_value="/secure/path") as save:
             daemon._deliver_dictation(job, "Hello.")
         save.assert_called_once_with("Hello.")
@@ -750,6 +915,25 @@ class AgentGateTests(unittest.TestCase):
         daemon.backend.transcribe.return_value = ""
         threading.Thread(target=daemon._transcription_worker, daemon=True).start()
         daemon.jobs.join()
+        deadline = time.monotonic() + 2
+        while daemon.gate.held and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertFalse(daemon.gate.held)
+
+    @patch("voicekey.daemon.notify")
+    @_focused()
+    def test_lock_is_held_while_the_text_is_being_delivered(self, _focus, _notify):
+        daemon = self._daemon()
+        daemon._start("/dev/input/event3", frozenset(), "hold", "dictate", "release")
+        daemon._finish()
+        daemon.backend = Mock()
+        daemon.backend.transcribe.return_value = "hello"
+        threading.Thread(target=daemon._transcription_worker, daemon=True).start()
+        daemon.jobs.join()
+        self.assertTrue(daemon.gate.held, "transcribed, not yet landed")
+        with patch.object(daemon, "_deliver_dictation"):
+            threading.Thread(target=daemon._delivery_worker, daemon=True).start()
+            daemon.deliveries.join()
         deadline = time.monotonic() + 2
         while daemon.gate.held and time.monotonic() < deadline:
             time.sleep(0.01)
