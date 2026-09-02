@@ -255,7 +255,7 @@ transducer, which needs beam search and must be timed.
 ## 3. Order of work
 
 0. **Patch first**: the three items in 1.1 to 1.3, each with a test.
-   Done and committed 2026-09-03 (`193dcb0` to `0c83f28`), together with
+   Done and committed 2026-09-03 (six commits of 2026-09-03), together with
    the fixes from the Codex cross-audit; the suite is at 149 tests.
 1. **Continuous capture and endpointing**: persistent key, `Recorder` cut,
    `Session` rollover, binding refresh per utterance, focus pause, gate per
