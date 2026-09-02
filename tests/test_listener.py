@@ -49,6 +49,20 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(on_activity.call_count, 2, "a key and a click; no repeats, no releases")
 
 
+class ReadTests(unittest.TestCase):
+    def test_a_readable_device_with_nothing_to_read_is_not_a_disconnect(self):
+        on_device_lost = Mock()
+        listener = KeyboardListener({ecodes.KEY_F9}, Mock(), on_device_lost, Mock(), Mock())
+        device = Mock(path="/dev/input/event3")
+        listener.devices[device.path] = device
+        device.read.side_effect = BlockingIOError()  # the fd is non-blocking
+        self.assertEqual(listener._read(device), [])
+        on_device_lost.assert_not_called()
+        device.read.side_effect = OSError("gone")
+        self.assertIsNone(listener._read(device))
+        on_device_lost.assert_called_once_with("/dev/input/event3")
+
+
 class InputDeviceSelectionTests(unittest.TestCase):
     def test_full_keyboard_with_configured_function_key_is_selected(self):
         device = Mock()

@@ -118,6 +118,18 @@ class KeyboardListener:
             pass
         self.on_device_lost(path)
 
+    def _read(self, dev: InputDevice):
+        """The pending events of DEV, or None once it is gone. The fd is
+        non-blocking, so a device reported readable with nothing to read is
+        a spurious wakeup, not a disconnect."""
+        try:
+            return list(dev.read())
+        except BlockingIOError:
+            return []
+        except OSError:
+            self._drop(dev.path)
+            return None
+
     def dispatch(self, device_path: str, events) -> None:
         for ev in events:
             if ev.type != ecodes.EV_KEY:
@@ -152,10 +164,8 @@ class KeyboardListener:
             for dev in readable:
                 if dev.path not in self.devices:
                     continue
-                try:
-                    events = list(dev.read())
-                except OSError:
-                    self._drop(dev.path)
+                events = self._read(dev)
+                if events is None:
                     continue
                 self.dispatch(dev.path, events)
             self.on_tick()
