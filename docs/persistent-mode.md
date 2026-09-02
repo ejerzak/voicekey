@@ -148,7 +148,9 @@ Concrete changes:
 - The binding logic in `_prepare` (window, app, IME generation, Emacs pin,
   character before the cursor) becomes a `Binding` object taken once at
   start and refreshed at each utterance, so moving between fields inside
-  the same window works. Spacing then works unchanged.
+  the same window works. The refresh must also take the insertion mark
+  that `Spacing.settle` now decides by (whether one of ours landed in the
+  window since the mark), so spacing then works unchanged.
 - The gate (the flock agents wait on) is held per utterance, from first
   speech to landing, never for the whole session, or agents would be
   locked out for an hour.
@@ -165,8 +167,10 @@ raw live text visible in the meantime.
 ### 2.3 Emacs
 
 The existing delivery (pin the buffer, insert through `emacsclient` with
-the gesture of the current evil state, follow point within the buffer)
-already gives "start in one section, move to another". Two additions:
+the gesture of the current evil state and back to normal state afterwards,
+follow point within the buffer) already gives "start in one section, move
+to another". The pin is taken on a helper thread and the insert waits for
+it; a per-utterance repin keeps that order. Two additions:
 
 - A small `voicekey.el`, shipped in the repo, that records the buffer of
   the last command the user ran through the command loop
@@ -250,8 +254,9 @@ transducer, which needs beam search and must be timed.
 
 ## 3. Order of work
 
-0. **Patch first**: the three items in 1.1 to 1.3, each with a test
-   (the delivery cascade is not covered today). One to two days.
+0. **Patch first**: the three items in 1.1 to 1.3, each with a test.
+   Done and committed 2026-09-03 (`193dcb0` to `0c83f28`), together with
+   the fixes from the Codex cross-audit; the suite is at 149 tests.
 1. **Continuous capture and endpointing**: persistent key, `Recorder` cut,
    `Session` rollover, binding refresh per utterance, focus pause, gate per
    utterance, raw text landing. Test with `--replay` of a long WAV; the
