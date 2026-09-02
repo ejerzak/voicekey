@@ -268,3 +268,42 @@ transducer, which needs beam search and must be timed.
    backend.
 4. **Later**: paragraph-level polish in Emacs, backend comparison on the
    recordings corpus, hotwords.
+
+## 4. Setup dependence, and generalising later
+
+Everything above is written for one setup, and the code is not far off it
+either. What is specific:
+
+- **Compositor.** niri: the focus query, the input-method protocol, and
+  the agent terminal check. sway and Hyprland get the same protocols with
+  untested adapters; river, labwc and Wayfire lose Emacs recognition;
+  GNOME and KDE have no input-method-v2 at all, so no in-field preview.
+- **Editor.** Emacs with evil, delivered through `emacsclient`, and a
+  planned `voicekey.el`. Every other editor gets the generic commit.
+- **Agent.** Hermes in tmux inside Ghostty, its state read off the screen.
+- **Polish.** Ollama on a 12 GB desktop GPU, with a laptop routing to it
+  over the tailnet. Two machines, both the author's.
+- **Keys, distro, language.** F-keys and a laptop chord; Fedora, PipeWire,
+  a systemd user service, `wtype`, `wl-copy`, `notify-send`; English-only
+  models.
+- **Tuning.** The pause threshold and the focus policy are choices about
+  one person's way of talking.
+
+None of this needs undoing now. Machine-specific values already live in
+config outside the repository, and the defaults are neutral. Generalising,
+when it is wanted, means making the seams explicit rather than rewriting:
+
+- A compositor adapter (focus, window list, input-method availability)
+  with niri, sway and Hyprland behind it, and a documented "none" that
+  copies to the clipboard.
+- An editor-delivery adapter, with Emacs as the first implementation and
+  the generic input-method commit as the fallback. A VS Code or
+  terminal-vim adapter would be its own small project.
+- The agent target and polish backend already have config seams
+  (`agent.target`, the planned `[polish]` table); keep new targets behind
+  them.
+- Language as a model choice, not a code path.
+
+The signal to do it is someone else wanting to install voicekey, or one
+piece of this setup changing. Until then, seams cost little and full
+portability buys nothing here.
