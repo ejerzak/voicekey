@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
+import tempfile
+import threading
 import time
 import wave
 
@@ -15,23 +18,29 @@ STATE_DIR = os.path.join(
 LAST_RECOVERY = os.path.join(STATE_DIR, "last-recovery.txt")
 
 
+_saving = threading.Lock()
+
+
 def save(text: str) -> str:
-    """Retain an undelivered transcript, mode 0600, and return its path."""
-    os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
-    os.chmod(STATE_DIR, 0o700)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    fd = os.open(LAST_RECOVERY, flags, 0o600)
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            fd = -1
-            handle.write(text)
-            handle.write("\n")
-    finally:
-        if fd >= 0:
-            os.close(fd)
+    """Retain an undelivered transcript, mode 0600, and return its path.
+
+    Written whole to a private temporary file and renamed into place, under
+    a lock: the delivery and transcription workers can both fail at once,
+    and the file must always hold one complete transcript."""
+    with _saving:
+        os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+        os.chmod(STATE_DIR, 0o700)
+        fd, temporary = tempfile.mkstemp(prefix=".last-recovery-", dir=STATE_DIR)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                os.fchmod(fd, 0o600)
+                handle.write(text)
+                handle.write("\n")
+            os.replace(temporary, LAST_RECOVERY)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(temporary)
+            raise
     return LAST_RECOVERY
 
 
