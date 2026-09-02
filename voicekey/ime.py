@@ -58,6 +58,7 @@ class InputMethod:
             self._display = Display()
             self._display.connect()
         except Exception as exc:
+            self._close_pipe()
             raise ImeUnavailable(f"cannot connect to the Wayland display: {exc}")
         self._seat = self._manager = None
 
@@ -67,16 +68,24 @@ class InputMethod:
             elif interface == "zwp_input_method_manager_v2":
                 self._manager = registry.bind(name, ZwpInputMethodManagerV2, 1)
 
-        registry = self._display.get_registry()
-        registry.dispatcher["global"] = on_global
-        self._display.roundtrip()
-        if self._seat is None or self._manager is None:
-            self._display.disconnect()
-            raise ImeUnavailable("the compositor does not offer zwp_input_method_v2")
-        self._im = None
-        if not self._bind():
-            self._display.disconnect()
-            raise ImeUnavailable("another input method is already bound")
+        try:
+            registry = self._display.get_registry()
+            registry.dispatcher["global"] = on_global
+            self._display.roundtrip()
+            if self._seat is None or self._manager is None:
+                raise ImeUnavailable("the compositor does not offer zwp_input_method_v2")
+            self._im = None
+            if not self._bind():
+                raise ImeUnavailable("another input method is already bound")
+        except BaseException:
+            # Whatever failed — a refusal above or a compositor that went
+            # away mid-roundtrip — leaves neither connection nor pipe behind.
+            try:
+                self._display.disconnect()
+            except Exception:
+                pass
+            self._close_pipe()
+            raise
         self._thread = threading.Thread(target=self._run, name="ime", daemon=True)
         self._thread.start()
 
@@ -91,6 +100,13 @@ class InputMethod:
         self._closing = False
         self._commands: queue.SimpleQueue = queue.SimpleQueue()
         self._wake_r, self._wake_w = os.pipe()
+
+    def _close_pipe(self) -> None:
+        for fd in (self._wake_r, self._wake_w):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
     def _bind(self) -> bool:
         """(Re)create our input-method object.
