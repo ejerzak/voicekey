@@ -4,9 +4,13 @@ Hold a key: the microphone streams into the live recognizer and the partial
 text is previewed — as preedit in the focused field when its application
 speaks the input-method protocol, otherwise in a notification. Release: the
 whole recording gets a second, offline pass (more accurate, better
-punctuation) and that text replaces the preedit. If the field that was active
-at key-down is gone by then, the text is copied to the clipboard instead —
-never typed somewhere else. Emacs needs no focus for that: its buffer is
+punctuation) and that text replaces the preedit. If focus left the field's
+window meanwhile — an agent's browser, a dialog — the text waits, within
+its delay budget, for the window to be focused again and lands in the field
+then, replacing the provisional text if the application turned it into real
+text; if the window does not come back in time, or the field is gone, the
+text is copied to the clipboard instead — never typed somewhere else. Emacs
+needs no focus for any of that: its buffer is
 pinned at key-down and the text goes into it through emacsclient, whatever
 is focused by then. While anything is in flight, a lock in the runtime
 directory tells agents to keep their hands off the desktop. Transcription
@@ -60,6 +64,7 @@ PREVIEW_INTERVAL = 0.25  # seconds between notification updates
 ACTIVATION_WAIT = 0.2  # seconds to wait for the focused field after binding
 OVERLOAD_FRAMES = 30  # 3 s of audio the live recognizer may fall behind
 PIN_WAIT = 0.1  # seconds the preview waits for an idle Emacs to report the character before point
+FOCUS_POLL = 0.25  # seconds between looks at the focused window while waiting for it to return
 
 
 def _keycode(name: str) -> int:
@@ -130,6 +135,17 @@ class ImePreview:
     def commit(self, text: str) -> bool:
         self.closed = True
         return self.ime.commit(spaced(self.prefix, text), self.generation)
+
+    def replace(self, before: int, text: str) -> bool:
+        """Commit in place of BEFORE bytes of real text before the cursor."""
+        self.closed = True
+        return self.ime.replace(before, spaced(self.prefix, text), self.generation)
+
+
+class ProvisionalKept(Exception):
+    """The application turned the provisional text into real text, and it is
+    not at the cursor now: nothing can replace it, so the final text must
+    not be typed on top."""
 
 
 def spaced(prefix: str, text: str) -> str:
@@ -805,12 +821,16 @@ class Daemon:
         if isinstance(job.preview, ImePreview):
             job.preview.prefix = prefix
             try:
-                committed = self._same_window(job) and job.preview.commit(text)
+                committed = self._commit_in_field(job, text)
             except ImeHung as exc:
                 # The commit may still land when the compositor recovers, so
                 # neither type nor copy it: keep it where nothing can duplicate.
                 self._delivery_failed("voicekey: input method hung",
                                       f"{exc}; the text may still appear when the compositor recovers", text)
+                return
+            except ProvisionalKept:
+                self._copy_instead(text, "the application kept the live text elsewhere; "
+                                   "the final text is copied instead of typed on top")
                 return
             if committed:
                 log.info("committed in place")
@@ -819,7 +839,7 @@ class Daemon:
             job.preview.clear()
             self._copy_instead(text, "the field changed; copied instead of typing")
             return
-        if not self._same_window(job):
+        if not self._window_back(job):
             self._copy_instead(text, "focus changed; copied instead of typing")
             return
         if self.cfg.dictation.inject == "wtype":
@@ -846,6 +866,68 @@ class Daemon:
         if not self.cfg.dictation.require_same_window:
             return True
         return job.window_id is not None and focus.window_id() == job.window_id
+
+    def _commit_in_field(self, job: Job, text: str) -> bool:
+        """Commit into the field bound at key-down. If focus left its window
+        meanwhile, the field was deactivated and this commit would be
+        refused; so wait, within the delivery budget, for the window to be
+        focused and the field active again, and commit into that activation
+        — after finding out what the application did with the provisional
+        text it was showing. Kept as real text right before the cursor
+        (Chromium does this), it is replaced; kept somewhere else, nothing
+        can replace it and the final text is copied instead; dropped, which
+        is what GTK and every terminal do, the final text is committed as
+        usual. False when the field is not back within the budget."""
+        if self._same_window(job) and job.preview.commit(text):
+            return True
+        generation = self._reactivation(job)
+        if generation is None:
+            return False
+        job.preview.generation = generation
+        shown = job.preview.ime.left_showing()
+        surrounding = job.preview.ime.surrounding_text()
+        if shown and surrounding is not None:
+            before, after = surrounding
+            if before.endswith(shown):
+                log.info("the application kept the provisional text; replacing it")
+                return job.preview.replace(len(shown.encode()), text)
+            if shown in before or shown in after:
+                raise ProvisionalKept()
+        return job.preview.commit(text)
+
+    def _reactivation(self, job: Job) -> int | None:
+        """The field's activation once its window is focused again, or None
+        when that does not happen within the delivery budget."""
+        def back():
+            generation = job.preview.ime.activation()
+            if generation is None or generation == job.preview.generation:
+                return None
+            return generation if focus.window_id() == job.window_id else None
+        return self._await_window(job, back)
+
+    def _window_back(self, job: Job) -> bool:
+        """The window is focused, now or within the delivery budget."""
+        if self._same_window(job):
+            return True
+        return bool(self._await_window(job, lambda: focus.window_id() == job.window_id or None))
+
+    def _await_window(self, job: Job, ready):
+        """Poll READY until it returns something, within what is left of the
+        delay budget; nothing to wait for without a verifiable window."""
+        if not self.cfg.dictation.require_same_window or job.window_id is None:
+            return None
+        budget = self._budget(job)
+        deadline = time.monotonic() + budget
+        log.info("the window is not focused; waiting up to %.0fs for it", budget)
+        notify("⏳ Waiting for focus", "the text lands once its window is focused again",
+               ms=int(budget * 1000), channel="dictate")
+        while True:
+            result = ready()
+            if result is not None:
+                return result
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(FOCUS_POLL)
 
     def _copy_instead(self, text: str, reason: str, *, summary: str = "voicekey: not typed") -> None:
         """The clipboard is one wl-copy away from being overwritten, so the

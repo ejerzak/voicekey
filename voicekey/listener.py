@@ -25,6 +25,15 @@ NO_ACCESS_RETRY = 10.0
 
 
 TYPING_KEYS = {ecodes.KEY_A, ecodes.KEY_SPACE, ecodes.KEY_ENTER}
+# A modifier on its own types nothing, so it is not activity. A dedicated
+# dictation key may come with phantom modifiers (the Copilot key reports
+# Left Meta + Left Shift + F23), which would otherwise hand spacing back to
+# the user before every dictation.
+MODIFIERS = {
+    ecodes.KEY_LEFTSHIFT, ecodes.KEY_RIGHTSHIFT, ecodes.KEY_LEFTCTRL, ecodes.KEY_RIGHTCTRL,
+    ecodes.KEY_LEFTALT, ecodes.KEY_RIGHTALT, ecodes.KEY_LEFTMETA, ecodes.KEY_RIGHTMETA,
+    ecodes.KEY_CAPSLOCK, ecodes.KEY_NUMLOCK, ecodes.KEY_SCROLLLOCK, ecodes.KEY_FN,
+}
 
 
 def _supports_any_key(dev: InputDevice, keycodes: set[int]) -> bool:
@@ -50,8 +59,8 @@ class KeyboardListener:
       on_device_lost(device_path)          — device vanished (may hold a key)
       on_tick()                            — every loop iteration (~1s max)
       on_no_access(message)                — no readable key devices (once per outage)
-      on_activity()                        — any other key or button was pressed
-                                             (the fact only; never which one)
+      on_activity()                        — any other key or button was pressed,
+                                             modifiers aside (the fact only; never which one)
     """
 
     def __init__(self, keycodes: set[int], on_key, on_device_lost, on_tick,
@@ -137,7 +146,7 @@ class KeyboardListener:
             if ev.code in self.keycodes:
                 if ev.value in (0, 1):  # ignore repeats (2)
                     self.on_key(device_path, ev.code, ev.value)
-            elif ev.value == 1 and self.on_activity is not None:
+            elif ev.value == 1 and ev.code not in MODIFIERS and self.on_activity is not None:
                 self.on_activity()
 
     def run(self) -> None:

@@ -48,6 +48,23 @@ class DispatchTests(unittest.TestCase):
                           ("/dev/input/event3", ecodes.KEY_F9, 0)])
         self.assertEqual(on_activity.call_count, 2, "a key and a click; no repeats, no releases")
 
+    def test_modifiers_alone_are_not_activity(self):
+        # The Copilot key reports Left Meta + Left Shift + F23; a Shift held
+        # for a capital is followed by the letter, which counts.
+        on_key, on_activity = Mock(), Mock()
+        listener = KeyboardListener({ecodes.KEY_F23}, on_key, Mock(), Mock(), Mock(),
+                                    on_activity=on_activity)
+        listener.dispatch("/dev/input/event3", [
+            _event(ecodes.KEY_LEFTMETA, 1), _event(ecodes.KEY_LEFTSHIFT, 1), _event(ecodes.KEY_F23, 1),
+            _event(ecodes.KEY_F23, 0), _event(ecodes.KEY_LEFTSHIFT, 0), _event(ecodes.KEY_LEFTMETA, 0),
+        ])
+        on_activity.assert_not_called()
+        self.assertEqual(on_key.call_count, 2)
+        listener.dispatch("/dev/input/event3", [
+            _event(ecodes.KEY_LEFTSHIFT, 1), _event(ecodes.KEY_A, 1),
+        ])
+        on_activity.assert_called_once()
+
 
 class ReadTests(unittest.TestCase):
     def test_a_readable_device_with_nothing_to_read_is_not_a_disconnect(self):

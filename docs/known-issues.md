@@ -2,7 +2,14 @@
 
 ## Headed Playwright MCP work steals compositor focus
 
-**Status:** open (observed 2026-09-04)
+**Status:** open on the Playwright side (observed 2026-09-04). The voicekey
+side below was done on 2026-09-05: delivery waits, within
+`max_delay_seconds`, for the dictation's window to be focused again and
+commits into the field's new activation, replacing provisional text the
+application kept right before the cursor, leaving alone (and copying the
+final text instead) provisional text it kept elsewhere, and trusting a
+field that reports no surrounding text to have dropped it. Emacs was
+already immune (pinned buffer). What remains is on the Playwright side.
 
 Background LLM tasks using Playwright MCP regularly move compositor focus to
 the headed browser even though the task does not need keyboard focus. This is

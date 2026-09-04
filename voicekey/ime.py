@@ -10,9 +10,14 @@ and wtype.
 
 One connection, one thread. ``preedit`` is fire-and-forget, ``commit`` waits.
 Every request names the activation *generation* it belongs to, so text never
-lands in a field that gained focus after the recording started. If the
-connection dies the object turns itself off: ``activation()`` is None and
-requests are dropped, so the daemon degrades to notifications and typing."""
+lands in a field that gained focus after the recording started. When focus
+leaves mid-dictation the application decides what becomes of the preedit
+(some keep it as text, most drop it) and tells us nothing; so the object
+remembers what the field was showing when it was deactivated, and reports
+the surrounding text of the next activation, for the daemon to reconcile
+the two. If the connection dies the object turns itself off:
+``activation()`` is None and requests are dropped, so the daemon degrades
+to notifications and typing."""
 
 from __future__ import annotations
 
@@ -96,6 +101,8 @@ class InputMethod:
         self._serial = 0  # number of `done` events received; echoed in commit()
         self._unavailable = False
         self._surrounding: tuple[str, int] | None = None
+        self._shown = ""  # preedit the field is showing now (applied requests only)
+        self._left_showing = ""  # preedit the field had when it was last deactivated
         self._dead = False
         self._closing = False
         self._commands: queue.SimpleQueue = queue.SimpleQueue()
@@ -139,10 +146,23 @@ class InputMethod:
         """The character before the cursor in the active field, "" when the
         application reports surrounding text with nothing before the cursor,
         None when it reports none at all (terminals)."""
+        surrounding = self.surrounding_text()
+        return None if surrounding is None else surrounding[0][-1:]
+
+    def surrounding_text(self) -> tuple[str, str] | None:
+        """(text before the cursor, text after) as the active field reports
+        it — a window around the cursor, not the whole field — or None when
+        it reports nothing (terminals)."""
         if not self._active or self._surrounding is None:
             return None
         text, cursor = self._surrounding
-        return text.encode()[:cursor].decode(errors="ignore")[-1:]
+        raw = text.encode()
+        return (raw[:cursor].decode(errors="ignore"), raw[cursor:].decode(errors="ignore"))
+
+    def left_showing(self) -> str:
+        """The preedit the field was showing when it was last deactivated;
+        what the application did with it is for the caller to find out."""
+        return self._left_showing
 
     def rebind(self) -> bool:
         """Bind afresh; the activation for a focused field follows shortly."""
@@ -154,6 +174,11 @@ class InputMethod:
     def commit(self, text: str, generation: int) -> bool:
         """Insert TEXT in place of the preedit. False if the field went away."""
         return self._call(lambda: self._apply(generation, commit=text))
+
+    def replace(self, before: int, text: str, generation: int) -> bool:
+        """Delete BEFORE bytes before the cursor and insert TEXT there, in
+        one step. False if the field went away."""
+        return self._call(lambda: self._apply(generation, commit=text, delete_before=before))
 
     def _call(self, function) -> bool:
         """Run FUNCTION on the loop thread and wait for its result.
@@ -213,6 +238,7 @@ class InputMethod:
     def _on_activate(self, im) -> None:
         self._pending_active = True
         self._surrounding = None
+        self._shown = ""
 
     def _on_deactivate(self, im) -> None:
         self._pending_active = False
@@ -232,6 +258,9 @@ class InputMethod:
             self._active = self._pending_active
             if self._active:
                 self._generation += 1
+            else:
+                self._left_showing = self._shown
+                self._shown = ""
             log.debug("input method %s (generation %d)",
                       "active" if self._active else "inactive", self._generation)
 
@@ -244,7 +273,7 @@ class InputMethod:
     # --- requests (loop thread) ---
 
     def _apply(self, generation: int, *, preedit: str | None = None,
-               commit: str | None = None) -> bool:
+               commit: str | None = None, delete_before: int = 0) -> bool:
         if self._unavailable or not self._active or self._generation != generation:
             return False
         # Text-input state is double-buffered and resets on every commit, so a
@@ -252,11 +281,17 @@ class InputMethod:
         # send an empty preedit string instead: GTK treats "" as a preedit that
         # is still present and skips preedit-end, which leaves Ghostty in its
         # composing state, swallowing every printable key.
+        if delete_before:
+            self._im.delete_surrounding_text(delete_before, 0)
         if commit is not None:
             self._im.commit_string(commit)
+            self._shown = ""
         elif preedit:
             end = len(preedit.encode())
             self._im.set_preedit_string(preedit, end, end)
+            self._shown = preedit
+        else:
+            self._shown = ""
         self._im.commit(self._serial)
         self._display.flush()
         return True

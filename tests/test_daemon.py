@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import os
 import tempfile
 import threading
@@ -20,6 +21,15 @@ from voicekey.focus import Focus
 
 def _focused(window=7, app="ghostty"):
     return patch("voicekey.daemon.focus.focused", return_value=Focus(window, app))
+
+
+def _ticking(start=2.0, step=1.0):
+    """A clock that advances on every read and a sleep that does not, so a
+    delivery waiting for a window to come back runs out of budget at once."""
+    def decorate(test):
+        test = patch("voicekey.daemon.time.sleep", new=lambda seconds: None)(test)
+        return patch("voicekey.daemon.time.monotonic", side_effect=itertools.count(start, step))(test)
+    return decorate
 
 FRAME = np.zeros(1600, dtype=np.float32)
 
@@ -54,6 +64,9 @@ class FakeIme:
         self.commit_result = True
         self.rebinds = 0
         self._delay = activation_delay_calls
+        self.surrounding = None  # (before, after) the field reports, or None
+        self.showing = ""  # the preedit it had when it was deactivated
+        self.replacements = []
 
     def activation(self):
         if self._delay > 0:
@@ -68,12 +81,22 @@ class FakeIme:
     def before_cursor(self):
         return None
 
+    def surrounding_text(self):
+        return self.surrounding
+
+    def left_showing(self):
+        return self.showing
+
     def preedit(self, text, generation):
         self.preedits.append((text, generation))
 
     def commit(self, text, generation):
         self.commits.append((text, generation))
-        return self.commit_result
+        return self.commit_result and generation == self.generation
+
+    def replace(self, before, text, generation):
+        self.replacements.append((before, text, generation))
+        return self.commit_result and generation == self.generation
 
 
 class FakeStream:
@@ -131,7 +154,7 @@ class DeliveryTests(unittest.TestCase):
     @patch("voicekey.daemon.inject_mod.copy")
     @patch("voicekey.daemon.inject_mod.type_text")
     @patch("voicekey.daemon.focus.window_id", return_value=8)
-    @patch("voicekey.daemon.time.monotonic", return_value=2.0)
+    @_ticking()
     def test_focus_change_is_copied_and_saved(self, _clock, _focus, type_text, copy, notify):
         with patch("voicekey.daemon.recovery.save", return_value="/secure/path") as save:
             self.daemon._deliver_dictation(_job("dictate", window_id=7), "hello")
@@ -143,7 +166,7 @@ class DeliveryTests(unittest.TestCase):
     @patch("voicekey.daemon.notify")
     @patch("voicekey.daemon.inject_mod.copy")
     @patch("voicekey.daemon.focus.window_id", return_value=8)
-    @patch("voicekey.daemon.time.monotonic", return_value=2.0)
+    @_ticking()
     def test_a_copy_survives_a_failed_recovery_save(self, _clock, _focus, copy, notify):
         with patch("voicekey.daemon.recovery.save", side_effect=OSError("read-only fs")):
             self.daemon._deliver_dictation(_job("dictate", window_id=7), "hello")
@@ -192,7 +215,7 @@ class DeliveryTests(unittest.TestCase):
     @patch("voicekey.daemon.inject_mod.copy")
     @patch("voicekey.daemon.inject_mod.type_text")
     @patch("voicekey.daemon.focus.window_id", return_value=7)
-    @patch("voicekey.daemon.time.monotonic", return_value=2.0)
+    @_ticking()
     def test_lost_field_is_copied_never_typed(self, _clock, _focus, type_text, copy, _notify):
         ime = FakeIme()
         ime.commit_result = False
@@ -204,12 +227,89 @@ class DeliveryTests(unittest.TestCase):
     @patch("voicekey.daemon.notify")
     @patch("voicekey.daemon.inject_mod.copy")
     @patch("voicekey.daemon.focus.window_id", return_value=8)
-    @patch("voicekey.daemon.time.monotonic", return_value=2.0)
+    @_ticking()
     def test_window_is_checked_before_ime_commit(self, _clock, _focus, copy, _notify):
         ime = FakeIme()
         self.daemon._deliver_dictation(_job("dictate", ImePreview(ime, 1), 7), "hello")
         self.assertEqual(ime.commits, [])
         copy.assert_called_once_with("hello")
+
+    @patch("voicekey.daemon.notify")
+    @patch("voicekey.daemon.inject_mod.copy")
+    @patch("voicekey.daemon.focus.window_id", side_effect=[8, 8, 7, 7])
+    @_ticking()
+    def test_focus_stolen_and_returned_lands_in_the_field_again(self, _clock, _focus, copy, notify):
+        # Focus went to an agent's browser mid-dictation; the field was
+        # deactivated and, being a terminal, dropped the preedit. When the
+        # window is focused again the field activates afresh (generation 2)
+        # and the text lands there.
+        ime = FakeIme(generation=2)
+        self.daemon._deliver_dictation(_job("dictate", ImePreview(ime, 1), 7), "hello")
+        self.assertEqual(ime.commits, [("hello", 2)])
+        copy.assert_not_called()
+        self.assertIn("Waiting for focus", str(notify.call_args_list))
+
+    @patch("voicekey.daemon.notify")
+    @patch("voicekey.daemon.inject_mod.copy")
+    @patch("voicekey.daemon.focus.window_id", return_value=7)
+    @_ticking()
+    def test_provisional_text_the_application_kept_is_replaced(self, _clock, _focus, copy, _notify):
+        # Chromium turns the preedit into real text when focus leaves; it is
+        # right before the cursor on return, so the final text replaces it.
+        ime = FakeIme(generation=2)
+        ime.showing = " hello wor"
+        ime.surrounding = ("Dear all, hello wor", "")
+        preview = ImePreview(ime, 1)
+        self.daemon._deliver_dictation(_job("dictate", preview, 7), "hello world")
+        self.assertEqual(ime.replacements, [(len(" hello wor"), "hello world", 2)])
+        self.assertEqual(ime.commits, [("hello world", 1)], "the first attempt, refused as stale")
+        copy.assert_not_called()
+
+    @patch("voicekey.daemon.notify")
+    @patch("voicekey.daemon.inject_mod.copy")
+    @patch("voicekey.daemon.focus.window_id", return_value=7)
+    @_ticking()
+    def test_provisional_text_kept_away_from_the_cursor_is_never_typed_over(self, _clock, _focus, copy, notify):
+        ime = FakeIme(generation=2)
+        ime.showing = " hello wor"
+        ime.surrounding = ("Dear all, hello wor and then", "")
+        self.daemon._deliver_dictation(_job("dictate", ImePreview(ime, 1), 7), "hello world")
+        self.assertEqual(ime.replacements, [])
+        self.assertEqual(ime.commits, [("hello world", 1)], "only the stale attempt; nothing typed over")
+        copy.assert_called_once_with("hello world")
+        self.assertIn("kept the live text elsewhere", str(notify.call_args))
+
+    @patch("voicekey.daemon.notify")
+    @patch("voicekey.daemon.inject_mod.copy")
+    @patch("voicekey.daemon.focus.window_id", return_value=8)
+    @_ticking()
+    def test_a_window_that_never_comes_back_is_copied_after_the_budget(self, clock, _focus, copy, _notify):
+        ime = FakeIme(generation=2)
+        self.daemon._deliver_dictation(_job("dictate", ImePreview(ime, 1), 7), "hello")
+        self.assertEqual(ime.commits, [])
+        copy.assert_called_once_with("hello")
+        self.assertGreater(clock.call_count, 5, "it waited")
+
+    @patch("voicekey.daemon.notify")
+    @patch("voicekey.daemon.inject_mod.copy")
+    @patch("voicekey.daemon.time.monotonic", return_value=2.0)
+    def test_without_a_verifiable_window_nothing_is_waited_for(self, _clock, copy, _notify):
+        # A frozen clock: any wait would hang the test.
+        self.daemon.cfg.dictation.require_same_window = False
+        ime = FakeIme(generation=2)
+        self.daemon._deliver_dictation(_job("dictate", ImePreview(ime, 1), 7), "hello")
+        self.assertEqual(ime.commits, [("hello", 1)], "tried once, with the field's own generation")
+        copy.assert_called_once_with("hello")
+
+    @patch("voicekey.daemon.notify")
+    @patch("voicekey.daemon.inject_mod.copy")
+    @patch("voicekey.daemon.inject_mod.type_text")
+    @patch("voicekey.daemon.focus.window_id", side_effect=[8, 8, 7])
+    @_ticking()
+    def test_typing_waits_for_the_window_too(self, _clock, _focus, type_text, copy, _notify):
+        self.daemon._deliver_dictation(_job("dictate", window_id=7), "hello")
+        type_text.assert_called_once_with("hello")
+        copy.assert_not_called()
 
     @patch("voicekey.daemon.notify")
     def test_full_agent_queue_recovers_prompt(self, _notify):
@@ -982,7 +1082,7 @@ class SpacingIntegrationTests(unittest.TestCase):
 
     @patch("voicekey.daemon.notify")
     @patch("voicekey.daemon.focus.window_id", return_value=7)
-    @patch("voicekey.daemon.time.monotonic", return_value=2.0)
+    @_ticking()
     def test_a_copy_leaves_the_spacing_state_alone(self, _clock, _focus, _notify):
         daemon = Daemon(Config())
         daemon.spacing.inserted(7, "Hello.", daemon.spacing.mark())

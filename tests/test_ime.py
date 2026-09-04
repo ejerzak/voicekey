@@ -22,6 +22,9 @@ class FakeProxy:
     def commit(self, serial):
         self.calls.append(("commit", serial))
 
+    def delete_surrounding_text(self, before, after):
+        self.calls.append(("delete", before, after))
+
 
 class FakeDisplay:
     def flush(self):
@@ -95,6 +98,37 @@ class ActivationTests(unittest.TestCase):
         ime._on_done(None)
         self.assertTrue(ime._apply(1, commit="final text"))
         self.assertEqual(ime._im.calls, [("commit_string", "final text"), ("commit", 1)])
+
+    def test_what_the_field_was_showing_at_deactivation_is_remembered(self):
+        ime = _offline_input_method()
+        ime._on_activate(None)
+        ime._on_done(None)
+        ime._apply(1, preedit="hello wor")
+        self.assertEqual(ime.left_showing(), "", "still active: nothing was left behind")
+        ime._on_deactivate(None)
+        ime._on_done(None)
+        self.assertEqual(ime.left_showing(), "hello wor")
+        ime._apply(1, preedit="stale")  # refused: inactive, so it changes nothing
+        self.assertEqual(ime.left_showing(), "hello wor")
+        # A field that committed, or was cleared, before deactivation left nothing.
+        ime._on_activate(None)
+        ime._on_done(None)
+        ime._apply(2, preedit="again")
+        ime._apply(2, commit="again")
+        ime._on_deactivate(None)
+        ime._on_done(None)
+        self.assertEqual(ime.left_showing(), "")
+
+    def test_surrounding_text_is_split_at_the_cursor_and_replace_deletes_before_it(self):
+        ime = _offline_input_method()
+        ime._on_activate(None)
+        ime._on_surrounding_text(None, "Dear all, héllo wor|after", len("Dear all, héllo wor".encode()), 0)
+        ime._on_done(None)
+        self.assertEqual(ime.surrounding_text(), ("Dear all, héllo wor", "|after"))
+        self.assertEqual(ime.before_cursor(), "r")
+        self.assertTrue(ime._apply(1, commit="hello world", delete_before=len("héllo wor".encode())))
+        self.assertEqual(ime._im.calls, [("delete", 10, 0), ("commit_string", "hello world"), ("commit", 1)])
+        self.assertEqual(ime.left_showing(), "")
 
     def test_clearing_sends_a_bare_commit_never_an_empty_preedit(self):
         ime = _offline_input_method()

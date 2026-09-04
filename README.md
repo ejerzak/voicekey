@@ -15,10 +15,13 @@ transcript. Everything runs locally on the CPU; nothing leaves the machine.
   punctuation.
 - **Never in the wrong place.** Text goes only into the field that was
   active when the key went down (captured within a few milliseconds of
-  the press). If that field is gone by the time the final pass lands, the
-  transcript is copied to the clipboard and a notification says so. In
-  Emacs the buffer itself is pinned at key-down, so nothing that moves
-  focus in the meantime can redirect the text.
+  the press). If something steals focus mid-dictation — an agent's browser,
+  a dialog — the text waits for that window to be focused again, up to
+  `max_delay_seconds`, and lands in the field then; if the window does not
+  come back in time, or the field is gone, the transcript is copied to the
+  clipboard and a notification says so. In Emacs the buffer itself is
+  pinned at key-down, so nothing that moves focus in the meantime can
+  redirect the text.
 - **Optional polish pass.** A small language model can clean the transcript
   before it lands: fillers, stutters and self-corrections go, punctuation
   and numbers are written out, nothing is added. Off by default; on a laptop
@@ -123,13 +126,25 @@ runs once the dialog is dismissed, and a paste on top of it would double
 the text. The live preview is still the preedit; Emacs also reports the
 character before point, so spacing there is exact.
 
+When focus leaves a field that is showing provisional text, the
+application decides what becomes of that text and tells the input method
+nothing: GTK applications and every terminal drop it, Chromium keeps it as
+real text. So when the window is focused again voicekey looks at what the
+field reports around the cursor. The provisional text right before the
+cursor is replaced by the final text in one step; provisional text kept
+somewhere else is left alone and the final text copied, never typed on top;
+and a field that reports nothing (a terminal) is trusted to have dropped
+it.
+
 Spacing between dictations is automatic: a dictation that continues text
 gets a leading space, one that starts a line or follows an opening bracket
 does not. The character before the cursor decides when the application
 reports it (GTK fields, Firefox); terminals and Emacs report nothing, so
 there voicekey adds a space only when it was itself the last thing to type
 in that window — a keystroke on any keyboard in between leaves spacing to
-you (mouse clicks are not observed).
+you (mouse clicks are not observed; a modifier on its own does not count,
+so a dictation key that reports phantom modifiers, as the Copilot key does,
+is fine).
 
 ## Configuration
 
