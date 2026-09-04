@@ -3,6 +3,7 @@
 #
 # System prerequisites (Fedora names): pipewire-utils (pw-record), wtype,
 # wl-clipboard, libnotify (notify-send), gcc (evdev builds from source), uv.
+# The optional polish pass needs llama.cpp, which --download fetches.
 # Config: ~/.config/voicekey/config.toml — created from config.example.toml if
 # absent; symlink your own (per-machine) file there instead if you keep one.
 # The venv lives outside the repo so binary wheels never travel with it.

@@ -33,7 +33,7 @@ def main() -> int:
     if args.download:
         from .backends import predownload
         try:
-            predownload(cfg.backend, cfg.streaming)
+            predownload(cfg.backend, cfg.streaming, cfg.polish)
         except Exception as exc:
             print(f"model download failed: {exc}", file=sys.stderr)
             return 1
@@ -57,6 +57,8 @@ def main() -> int:
     except ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)
         return 1
+    finally:
+        daemon.close()
     return 0
 
 
@@ -71,6 +73,7 @@ def check(cfg) -> int:
     from .daemon import fix_environment
     from .ime import ImeUnavailable, InputMethod
     from .listener import _supports_any_key, all_event_devices
+    from .polish import PolishError, create_polisher, start_server
 
     fix_environment()
     key_names = (cfg.dictate_key, cfg.agent_key, cfg.dictate_toggle_key, cfg.agent_toggle_key)
@@ -97,6 +100,8 @@ def check(cfg) -> int:
     required = {"notify-send", "pw-record", "wl-copy"}
     if cfg.dictation.inject == "wtype":
         required.add("wtype")
+    if cfg.polish.backend != "none" and cfg.polish.server.model_file:
+        required.add(cfg.polish.server.command)
     compositor = focus.compositor()
     focus_tool = {"niri": "niri", "sway": "swaymsg", "hyprland": "hyprctl"}.get(compositor)
     if focus_tool:
@@ -181,6 +186,26 @@ def check(cfg) -> int:
             print("input method: OK (live text goes into the focused field)")
         except ImeUnavailable as exc:
             print(f"input method: unavailable ({exc}); previews use notifications")
+    if cfg.polish.backend == "none":
+        print("polish: off")
+    else:
+        print(f"polish: {cfg.polish.format} via {cfg.polish.url} (model {cfg.polish.model}, "
+              f"style {cfg.polish.style}, up to {cfg.polish.max_wait_seconds:g}s)")
+        server = None
+        try:
+            server = start_server(cfg.polish)
+            polisher = create_polisher(cfg.polish, server)
+            cleaned = polisher.polish("so um this is uh a test of the the polish pass", 15.0)
+            if cleaned is None:
+                print("WARNING: polish: the model did not answer; transcripts will land "
+                      "unpolished (see the journal or polish-server.log)", file=sys.stderr)
+            else:
+                print(f"polish: OK ({cleaned!r})")
+        except PolishError as exc:
+            print(f"WARNING: polish unavailable: {exc}", file=sys.stderr)
+        finally:
+            if server is not None:
+                server.stop()
     if missing:
         return 1
     if not key_devices:

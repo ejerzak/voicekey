@@ -13,6 +13,7 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 
+from voicekey import backends
 from voicekey.backends import (
     MODEL_FILES,
     MODELS,
@@ -146,6 +147,44 @@ class ModelDownloadTests(unittest.TestCase):
                 with self.assertRaisesRegex(BackendUnavailable, "checksum mismatch"):
                     ensure_model(str(model_dir))  # real digests, fake content
             self.assertFalse(model_dir.exists())
+
+    @staticmethod
+    def _llama_archive(links: dict[str, str]) -> bytes:
+        output = io.BytesIO()
+        with tarfile.open(fileobj=output, mode="w:gz") as archive:
+            for name in ("llama-server", "libllama.so.0.3.0"):
+                info = tarfile.TarInfo(f"llama-{backends.LLAMA_BUILD}/{name}")
+                info.size = 3
+                archive.addfile(info, io.BytesIO(b"bin"))
+            for name, target in links.items():
+                info = tarfile.TarInfo(f"llama-{backends.LLAMA_BUILD}/{name}")
+                info.type = tarfile.SYMTYPE
+                info.linkname = target
+                archive.addfile(info)
+        return output.getvalue()
+
+    def _fetch_llama(self, directory, links):
+        data = self._llama_archive(links)
+        response = io.BytesIO(data)
+        response.headers = {}
+        with patch("voicekey.backends.urllib.request.urlopen", return_value=response), \
+                patch("voicekey.backends.LLAMA_DIR", os.path.join(directory, "llama.cpp")), \
+                patch("voicekey.backends.LLAMA_SHA256", hashlib.sha256(data).hexdigest()):
+            backends.ensure_llama()
+        return Path(directory) / "llama.cpp"
+
+    def test_llama_build_unpacks_with_its_library_links(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._fetch_llama(directory, {"libllama.so": "libllama.so.0.3.0"})
+            self.assertTrue((target / "llama-server").is_file())
+            self.assertEqual(os.readlink(target / "libllama.so"), "libllama.so.0.3.0")
+
+    def test_a_link_escaping_the_archive_is_rejected(self):
+        for target in ("../../etc/passwd", "/etc/passwd"):
+            with tempfile.TemporaryDirectory() as directory:
+                with self.assertRaisesRegex(BackendUnavailable, "link outside"):
+                    self._fetch_llama(directory, {"libllama.so": target})
+                self.assertFalse((Path(directory) / "llama.cpp").exists())
 
     def test_unknown_model_is_rejected_before_any_download(self):
         with tempfile.TemporaryDirectory() as directory:

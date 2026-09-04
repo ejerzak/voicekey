@@ -30,6 +30,24 @@ inject = "wtype"           # when the focused app has no text-input support:
 max_delay_seconds = 10.0   # older transcripts are copied, never typed late
 require_same_window = true # copy instead if niri focus changed during transcription
 
+[polish]                   # third pass: a language model cleans the transcript before it lands
+backend = "none"           # "none" | "openai" (any OpenAI-compatible chat endpoint: llama-server,
+                           # Ollama, vLLM — local or on another host)
+url = "http://127.0.0.1:8642/v1"
+model = "s1-mini"          # name sent in requests (llama-server ignores it; Ollama needs it)
+format = "s1-mini"         # "s1-mini": the fixed prompt S1-mini by Superwhisper was trained on
+                           # "instruct": our own prompt (prompt_file, or the built-in one), any model
+style = "semi-formal"      # s1-mini: casual | semi-casual | semi-formal | formal
+prompt_file = ""           # instruct only: replaces the built-in prompt; {style} is filled in
+api_key_file = ""          # for a server that is not voicekey's own (its child gets a fresh key)
+timeout_seconds = 10.0     # one request
+max_wait_seconds = 4.0     # past this the raw transcript lands unchanged
+[polish.server]            # llama-server run by voicekey as a child process, when model_file is set
+command = "~/.local/share/voicekey/llama.cpp/llama-server"  # install.sh fetches it; or one on PATH
+model_file = ""            # e.g. "~/.local/share/voicekey/s1-mini-q4_k_m.gguf" (install.sh fetches it)
+threads = 4
+context = 2048
+
 [agent]
 # Hermes lives in its own tmux server, independent of the editor and of
 # voicekey. The agent key opens a terminal only if none is attached; closing

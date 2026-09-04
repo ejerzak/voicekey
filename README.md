@@ -19,6 +19,11 @@ transcript. Everything runs locally on the CPU; nothing leaves the machine.
   transcript is copied to the clipboard and a notification says so. In
   Emacs the buffer itself is pinned at key-down, so nothing that moves
   focus in the meantime can redirect the text.
+- **Optional polish pass.** A small language model can clean the transcript
+  before it lands: fillers, stutters and self-corrections go, punctuation
+  and numbers are written out, nothing is added. Off by default; on a laptop
+  CPU it costs about half a second per sentence, and the raw transcript
+  lands unchanged whenever the model is late or not trusted.
 - **Optional agent key.** A second key sends the transcript to a persistent
   [Hermes](https://hermes-agent.nousresearch.com) agent session instead.
 
@@ -76,8 +81,9 @@ documented there. To check the setup:
 key down  ─ pw-record ─ 100 ms frames ─┬─ streaming model ─ live text ─ preedit in the focused field
                                        │                               (or a notification)
                                        └─ buffer
-key up    ─ buffer ─ offline model ─ final text ─ commit in place of the preedit
-                                                  (or wtype / clipboard)
+key up    ─ buffer ─ offline model ─ raw text ─ [polish model ─ clean text] ─ commit in place of the preedit
+                                                 (optional; raw text shown      (or wtype / clipboard)
+                                                  as preedit meanwhile)
 ```
 
 Keys are read directly from evdev, so press and release work even though
@@ -139,10 +145,59 @@ you (mouse clicks are not observed).
 | `[dictation] inject` | without an input method: `wtype` (type it) or `clipboard` (copy it and say so) |
 | `[dictation] max_delay_seconds` | older transcripts are copied, never typed late |
 | `[dictation] require_same_window` | copy instead of typing if the focused window changed (Emacs is exempt: its buffer is pinned) |
+| `[polish]` | third pass: `backend` (`none` or `openai`), `url`, `format` (`s1-mini` or `instruct`), `style`, `max_wait_seconds` |
+| `[polish.server]` | `model_file` makes voicekey run `llama-server` itself, as a child process; `command` names which one |
 | `[agent]` | Hermes target, local or over SSH via Tailscale |
 
 `install.sh` downloads the models the config names and verifies their
 SHA-256 digests.
+
+## Polish pass (optional)
+
+A transcript is what you said; a draft is what you meant. The polish pass
+hands the offline transcript to a language model and commits what comes
+back, so "so um i need to like send the the report by uh friday no wait make
+that thursday" lands as "So I need to send the report by Thursday." While
+the model works, the raw transcript stands in the field as preedit, so the
+words are visible at the same moment as before; what moves is when they
+solidify.
+
+The default model is [S1-mini by Superwhisper](https://huggingface.co/superwhisper/s1-mini),
+a 0.6B text normaliser trained for exactly this and nothing else: it will not
+follow instructions, answer questions or invent content, and it runs on the
+CPU (about half a second for a sentence, 1.5 s for a 500-character
+paragraph, on 4 threads). To turn it on:
+
+```toml
+[polish]
+backend = "openai"
+[polish.server]
+model_file = "~/.local/share/voicekey/s1-mini-q4_k_m.gguf"
+```
+
+then `./install.sh` (which fetches the model and a pinned llama.cpp release
+build, verifying both digests) and `systemctl --user restart voicekey`.
+voicekey starts `llama-server` as a child process and stops it with the
+daemon. `style` picks the register (`casual`, `semi-casual`, `semi-formal`,
+`formal`). A distribution's llama.cpp works too (`command = "llama-server"`
+under `[polish.server]`), but check its speed: Fedora's `llama-cpp` package
+is a ROCm build whose CPU path took 1.4 s for a sentence where the upstream
+CPU build took 0.4 s on the same machine.
+
+Any OpenAI-compatible chat endpoint works in place of the child server:
+leave `model_file` empty and point `url` at Ollama, vLLM or a llama-server
+elsewhere. With `format = "instruct"` voicekey sends its own prompt (or
+yours, from `prompt_file`) for a general model that can do more, such as
+LaTeX from a formula described in words.
+
+What the model returns is judged before it is used. A reply cut off at the
+token limit, one that grew beyond the input, or one where more than a
+quarter of the words were never said is rejected and the raw text lands;
+so does the raw text when the model does not answer within
+`max_wait_seconds` (4 s by default, and always within the delivery budget).
+An empty reply to a filler-only dictation means there is nothing to type.
+With `recordings_dir` set, every recording keeps its live, raw and polished
+texts side by side for review.
 
 ## Agent key (optional)
 
@@ -167,10 +222,12 @@ systemctl --user stop voicekey                                       # frees the
 
 `--check` exits 0 when ready, 2 when no keyboard is readable, 3 when only
 the agent target is unavailable, 1 on a configuration, dependency or model
-failure. Transcription and delivery run on separate threads, so a slow
-Emacs or a hung clipboard delays only the deliveries behind it, never the
-transcription of the next recording; a clipboard copy is given three
-seconds. Every transcript that was not typed — copied to the clipboard
+failure; with the polish pass on it also starts the model and runs one
+sentence through it. Transcription, polish and delivery run on separate
+threads, so a slow Emacs or a hung clipboard delays only the deliveries
+behind it, never the transcription of the next recording; a clipboard copy
+is given three seconds. The polish server's output goes to
+`~/.local/state/voicekey/polish-server.log`. Every transcript that was not typed — copied to the clipboard
 instead, or undeliverable — is also saved, mode 0600, at
 `~/.local/state/voicekey/last-recovery.txt`, since the clipboard is one
 `wl-copy` away from being overwritten.

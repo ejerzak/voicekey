@@ -22,7 +22,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .config import BackendConfig, StreamingConfig
+from .config import MODELS_DIR, BackendConfig, PolishConfig, StreamingConfig
 
 log = logging.getLogger("voicekey.backends")
 
@@ -50,6 +50,28 @@ MODELS = {
         "joiner.int8.onnx": "a35eac38a22ebceb04d230ed7afe0d68f446ba6914a036b97f14fece95967e23",
         "tokens.txt": "dc0b4584ab2e4ddbf888425c076c61b736e7356a015250db7d307e6f1a8188ff",
     },
+}
+
+
+# llama.cpp for the polish pass: the upstream CPU release build, which on a
+# laptop CPU runs S1-mini three to four times faster than Fedora's llama-cpp
+# package (a ROCm build with a generic CPU path: 1.4 s against 0.4 s for a
+# sentence on a Core Ultra 7). Unpacked to LLAMA_DIR; the binaries find their
+# libraries by rpath. A different llama-server is a config change.
+LLAMA_DIR = f"{MODELS_DIR}/llama.cpp"
+LLAMA_BUILD = "b10621"
+LLAMA_URL = (f"https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_BUILD}/"
+             f"llama-{LLAMA_BUILD}-bin-ubuntu-x64.tar.gz")
+LLAMA_SHA256 = "91d7b03ddae498a39f28fdb85d84d2b4a0fd3838d10b4f897e0ef8975bb9b583"
+
+# Single-file downloads (polish models), by file name: URL and SHA-256.
+FILES = {
+    # S1-mini by Superwhisper, Q4_K_M: Apache 2.0 with a naming clause (the
+    # model keeps the name "S1-mini" by "Superwhisper" wherever it is used).
+    "s1-mini-q4_k_m.gguf": (
+        "https://huggingface.co/superwhisper/s1-mini-GGUF/resolve/main/s1-mini-q4_k_m.gguf",
+        "3b41ebe2502cbd03e811d5d16b022f5ab551eda58d62597d152f89535003c634",
+    ),
 }
 
 
@@ -224,18 +246,26 @@ def _extract(archive_path: Path, destination: Path) -> None:
     root = destination.resolve()
     # Stream the bzip2 archive: random-access mode would decompress the large
     # encoder once to enumerate members and again to extract them.
-    with tarfile.open(archive_path, "r|bz2") as archive:
+    with tarfile.open(archive_path, "r|*") as archive:
         for member in archive:
             if not (destination / member.name).resolve().is_relative_to(root):
                 raise BackendUnavailable(
                     f"model archive contains an unsafe path: {member.name}"
                 )
-            if not (member.isfile() or member.isdir()):
+            if member.issym():
+                # llama.cpp ships each library under its plain name as a link
+                # to the versioned file; a link may only point within the tree.
+                target = (destination / member.name).parent / member.linkname
+                if os.path.isabs(member.linkname) or not target.resolve().is_relative_to(root):
+                    raise BackendUnavailable(
+                        f"model archive contains a link outside itself: {member.name}"
+                    )
+            elif not (member.isfile() or member.isdir()):
                 raise BackendUnavailable(
                     f"model archive contains an unsupported entry: {member.name}"
                 )
-            # Traversal, links and special entries are rejected above, so the
-            # ordinary mode bits of the model files are safe to keep.
+            # Traversal, escaping links and special entries are rejected
+            # above, so the ordinary mode bits of the files are safe to keep.
             archive.extract(member, destination, filter="fully_trusted")
 
 
@@ -291,7 +321,63 @@ def ensure_model(model_dir: str) -> None:
     print(f"model ready at {model_dir}")
 
 
-def predownload(backend: BackendConfig, streaming: StreamingConfig) -> None:
+def ensure_file(path: str) -> None:
+    """Download a known single-file model unless it is already there."""
+    target = Path(os.path.expanduser(path))
+    if target.is_file():
+        print(f"model ready at {target}")
+        return
+    known = FILES.get(target.name)
+    if known is None:
+        raise BackendUnavailable(
+            f"no download is known for {target.name!r}; known files: {', '.join(FILES)}"
+        )
+    url, digest = known
+    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=f".{target.name}-", dir=target.parent) as temporary:
+        staging = Path(temporary) / target.name
+        _download(url, staging)
+        if _sha256(staging) != digest:
+            raise BackendUnavailable(
+                f"checksum mismatch for {target.name} — the download is corrupt or the file changed"
+            )
+        shutil.move(str(staging), str(target))
+    print(f"model ready at {target}")
+
+
+def llama_server_path() -> str:
+    return os.path.expanduser(f"{LLAMA_DIR}/llama-server")
+
+
+def ensure_llama() -> None:
+    """Download and unpack the pinned llama.cpp build unless it is there."""
+    target = Path(os.path.expanduser(LLAMA_DIR))
+    if (target / "llama-server").is_file():
+        print(f"llama.cpp ready at {target}")
+        return
+    if target.exists():
+        raise BackendUnavailable(f"{target} exists but is incomplete — remove it and retry")
+    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".llama.cpp-", dir=target.parent) as temporary:
+        staging = Path(temporary)
+        archive_path = staging / "llama.cpp.tar.gz"
+        _download(LLAMA_URL, archive_path)
+        if _sha256(archive_path) != LLAMA_SHA256:
+            raise BackendUnavailable(
+                "checksum mismatch for the llama.cpp build — the download is corrupt or the archive changed"
+            )
+        extracted = staging / "extracted"
+        extracted.mkdir()
+        _extract(archive_path, extracted)
+        candidate = extracted / f"llama-{LLAMA_BUILD}"
+        if not (candidate / "llama-server").is_file():
+            raise BackendUnavailable("the llama.cpp archive does not contain llama-server")
+        shutil.move(str(candidate), str(target))
+    print(f"llama.cpp ready at {target}")
+
+
+def predownload(backend: BackendConfig, streaming: StreamingConfig,
+                polish: PolishConfig | None = None) -> None:
     """Fetch model weights without loading them (install step, not first keypress)."""
     if backend.type == "faster-whisper":
         from faster_whisper.utils import download_model
@@ -301,3 +387,7 @@ def predownload(backend: BackendConfig, streaming: StreamingConfig) -> None:
         ensure_model(backend.model_dir)
     if streaming.model_dir:
         ensure_model(streaming.model_dir)
+    if polish is not None and polish.backend != "none" and polish.server.model_file:
+        ensure_file(polish.server.model_file)
+        if polish.server.command == llama_server_path():
+            ensure_llama()

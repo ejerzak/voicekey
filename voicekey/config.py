@@ -12,6 +12,9 @@ from typing import Any
 DEFAULT_PATH = os.path.expanduser("~/.config/voicekey/config.toml")
 MODELS_DIR = "~/.local/share/voicekey"
 BACKEND_TYPES = {"faster-whisper", "parakeet"}
+POLISH_BACKENDS = {"none", "openai"}
+POLISH_FORMATS = {"s1-mini", "instruct"}
+S1_MINI_STYLES = ("casual", "semi-casual", "semi-formal", "formal")
 AGENT_TARGETS = {"hermes"}
 AGENT_TRANSPORTS = {"local", "ssh-over-tailscale"}
 TMUX_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,48}$")
@@ -67,6 +70,36 @@ class DictationConfig:
 
 
 @dataclass
+class PolishServerConfig:
+    """llama-server run by voicekey itself, as a child process, when
+    ``model_file`` names a GGUF; otherwise ``[polish] url`` must point at a
+    server someone else runs (Ollama, a llama-server on another host)."""
+
+    command: str = f"{MODELS_DIR}/llama.cpp/llama-server"  # install.sh fetches it; or "llama-server" from PATH
+    model_file: str = ""
+    threads: int = 4  # 4 is the knee on a laptop CPU; more contends with the recognizers
+    context: int = 2048  # room for a paragraph and its reply; the KV cache costs 115 MB per 1024
+
+
+@dataclass
+class PolishConfig:
+    """Third pass: a language model cleans the transcript before it lands.
+    Off by default; bounded by ``max_wait_seconds``, past which the raw
+    transcript lands unchanged."""
+
+    backend: str = "none"  # "none" | "openai" (any OpenAI-compatible chat endpoint)
+    url: str = "http://127.0.0.1:8642/v1"
+    model: str = "s1-mini"  # the name sent in requests; llama-server ignores it, Ollama needs it
+    format: str = "s1-mini"  # "s1-mini" (its trained prompt) | "instruct" (our prompt, any model)
+    style: str = "semi-formal"
+    prompt_file: str = ""  # instruct: a file replacing the built-in prompt
+    api_key_file: str = ""  # for a server that is not voicekey's own child
+    timeout_seconds: float = 10.0  # one request
+    max_wait_seconds: float = 4.0  # past this the raw transcript lands
+    server: PolishServerConfig = field(default_factory=PolishServerConfig)
+
+
+@dataclass
 class AgentConfig:
     """Persistent Hermes target; future targets implement the same seam."""
 
@@ -98,6 +131,7 @@ class Config:
     backend: BackendConfig = field(default_factory=BackendConfig)
     streaming: StreamingConfig = field(default_factory=StreamingConfig)
     dictation: DictationConfig = field(default_factory=DictationConfig)
+    polish: PolishConfig = field(default_factory=PolishConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
 
 
@@ -141,6 +175,47 @@ def _boolean(name: str, value: Any) -> bool:
     if not isinstance(value, bool):
         raise ConfigError(f"{name} must be true or false")
     return value
+
+
+def _integer(name: str, value: Any, *, minimum: int = 0) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise ConfigError(f"{name} must be an integer >= {minimum}")
+    return value
+
+
+def _validate_polish(cfg: PolishConfig) -> None:
+    cfg.backend = _string("polish.backend", cfg.backend)
+    if cfg.backend not in POLISH_BACKENDS:
+        raise ConfigError(
+            f"polish.backend must be one of {', '.join(sorted(POLISH_BACKENDS))}, "
+            f"got {cfg.backend!r}"
+        )
+    cfg.url = _string("polish.url", cfg.url).rstrip("/")
+    if not cfg.url.startswith(("http://", "https://")):
+        raise ConfigError("polish.url must start with http:// or https://")
+    cfg.model = _string("polish.model", cfg.model)
+    cfg.format = _string("polish.format", cfg.format)
+    if cfg.format not in POLISH_FORMATS:
+        raise ConfigError(
+            f"polish.format must be one of {', '.join(sorted(POLISH_FORMATS))}, "
+            f"got {cfg.format!r}"
+        )
+    cfg.style = _string("polish.style", cfg.style)
+    if cfg.format == "s1-mini" and cfg.style not in S1_MINI_STYLES:
+        raise ConfigError(
+            f"polish.style must be one of {', '.join(S1_MINI_STYLES)} for the "
+            f"s1-mini format, got {cfg.style!r}"
+        )
+    cfg.prompt_file = _path("polish.prompt_file", cfg.prompt_file)
+    cfg.api_key_file = _path("polish.api_key_file", cfg.api_key_file)
+    cfg.timeout_seconds = _number("polish.timeout_seconds", cfg.timeout_seconds, minimum=0.1)
+    cfg.max_wait_seconds = _number("polish.max_wait_seconds", cfg.max_wait_seconds, minimum=0.1)
+    command = _string("polish.server.command", cfg.server.command)
+    # A bare name is looked up on PATH; a path may start with ~.
+    cfg.server.command = _path("polish.server.command", command) if "/" in command else command
+    cfg.server.model_file = _path("polish.server.model_file", cfg.server.model_file)
+    cfg.server.threads = _integer("polish.server.threads", cfg.server.threads, minimum=1)
+    cfg.server.context = _integer("polish.server.context", cfg.server.context, minimum=512)
 
 
 def _validate(cfg: Config) -> None:
@@ -199,6 +274,8 @@ def _validate(cfg: Config) -> None:
     cfg.dictation.require_same_window = _boolean(
         "dictation.require_same_window", cfg.dictation.require_same_window
     )
+
+    _validate_polish(cfg.polish)
 
     cfg.agent.target = _string("agent.target", cfg.agent.target)
     if cfg.agent.target not in AGENT_TARGETS:
@@ -314,6 +391,9 @@ def load(path: str | None = None) -> Config:
         ("agent", cfg.agent),
     ):
         _apply(target, _table(data, section), f"{section}.")
+    polish = _table(data, "polish")
+    _apply(cfg.polish.server, _table(polish, "server"), "polish.server.")
+    _apply(cfg.polish, polish, "polish.")
     _apply(cfg, data, "")
     _validate(cfg)
     return cfg

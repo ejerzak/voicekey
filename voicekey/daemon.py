@@ -13,9 +13,12 @@ directory tells agents to keep their hands off the desktop. Transcription
 and delivery are separate workers, so a slow Emacs, a hung clipboard or a
 long wtype never delays the next recording's transcription (on 2026-08-30
 one hung wl-copy made the six dictations behind it late, and each was
-copied and hung in turn). Agent prompts share the pipeline up to
-transcription, then go to Hermes through their own queue and worker, so a
-busy agent never delays dictation."""
+copied and hung in turn). With a polish model configured, a third worker
+sits between them: the raw transcript replaces the live text as preedit
+while the model cleans it, and the cleaned text is what lands — or the raw
+text, once the model's deadline passes. Agent prompts share the pipeline up
+to transcription, then go to Hermes through their own queue and worker, so
+a busy agent never delays dictation."""
 
 from __future__ import annotations
 
@@ -36,6 +39,7 @@ from . import agent as agent_mod
 from . import emacs as emacs_mod
 from . import focus
 from . import inject as inject_mod
+from . import polish as polish_mod
 from . import recovery
 from .backends import BackendUnavailable, create_backend, create_streaming
 from .config import Config, ConfigError, key_chord_names
@@ -358,7 +362,10 @@ class Daemon:
         self.streaming = None
         self.ime: InputMethod | None = None
         self.jobs: queue.Queue[Job] = queue.Queue(maxsize=TRANSCRIPTION_QUEUE_SIZE)
+        self.polishing: queue.Queue[tuple[Job, str]] = queue.Queue()  # transcribed, being cleaned
         self.deliveries: queue.Queue[tuple[Job, str]] = queue.Queue()  # transcribed, not yet landed
+        self.polisher: polish_mod.Polisher | None = None
+        self.polish_server: polish_mod.LlamaServer | None = None
         self.agent_prompts: queue.Queue[str] = queue.Queue(maxsize=AGENT_QUEUE_SIZE)
         self.spacing = Spacing()
         self.gate = Gate()  # held while anything is in flight; agents wait on it
@@ -385,6 +392,15 @@ class Daemon:
         except Exception as exc:
             log.exception("streaming backend failed to load")
             notify("voicekey: live preview unavailable", f"{type(exc).__name__}: {exc}", error=True)
+        if self.cfg.polish.backend != "none":
+            try:
+                self.polish_server = polish_mod.start_server(self.cfg.polish)
+                self.polisher = polish_mod.create_polisher(self.cfg.polish, self.polish_server)
+            except polish_mod.PolishError as exc:
+                notify("voicekey: polish unavailable", f"{exc}; transcripts land unpolished", error=True)
+            except Exception as exc:
+                log.exception("polish failed to start")
+                notify("voicekey: polish unavailable", f"{type(exc).__name__}: {exc}", error=True)
         if self.cfg.dictation.ime:
             try:
                 self.ime = InputMethod()
@@ -395,9 +411,15 @@ class Daemon:
 
     def start_workers(self) -> None:
         for name, target in (("transcription", self._transcription_worker),
+                             ("polish", self._polish_worker),
                              ("delivery", self._delivery_worker),
                              ("agent-dispatch", self._agent_worker)):
             threading.Thread(target=target, daemon=True, name=name).start()
+
+    def close(self) -> None:
+        """Stop what the daemon started; called on the way out."""
+        if self.polish_server is not None:
+            self.polish_server.stop()
 
     def run(self) -> None:
         fix_environment()
@@ -440,6 +462,7 @@ class Daemon:
         if self.session is not None:
             self._finish()
         self.jobs.join()
+        self.polishing.join()
         self.deliveries.join()
         if action == "agent":
             self.agent_prompts.join()
@@ -613,8 +636,9 @@ class Daemon:
         self.gate.settle(lambda: self.session is not None or self._landing())
 
     def _landing(self) -> bool:
-        """Some recording is still being transcribed or delivered."""
-        return self.jobs.unfinished_tasks > 0 or self.deliveries.unfinished_tasks > 0
+        """Some recording is still being transcribed, polished or delivered."""
+        return (self.jobs.unfinished_tasks > 0 or self.polishing.unfinished_tasks > 0
+                or self.deliveries.unfinished_tasks > 0)
 
     def _on_device_lost(self, device: str) -> None:
         self.pressed.pop(device, None)
@@ -658,18 +682,19 @@ class Daemon:
             return False
         notify("⋯ Transcribing", ms=30000, channel=job.action)
         text = self.backend.transcribe(job.samples)
-        if self.cfg.recordings_dir:
-            try:
-                recovery.keep(self.cfg.recordings_dir, job.samples, job.live_text, text)
-            except Exception as exc:
-                log.warning("could not keep the recording: %s", exc)
+        polishing = bool(text) and job.action == "dictate" and self.polisher is not None
+        if not polishing:
+            self._keep(job, text)  # else kept once the polished text is known too
         if not text:
             job.preview.clear()
             notify("voicekey", "no speech detected", channel=job.action)
             return False
         log.info("transcribed %s prompt (%d chars)", job.action, len(text))
+        if polishing:
+            self.polishing.put((job, text))  # before task_done: the gate must see no gap
+            return True
         if job.action == "dictate":
-            self.deliveries.put((job, text))  # before task_done: the gate must see no gap
+            self.deliveries.put((job, text))
             return True
         job.preview.clear()
         try:
@@ -679,6 +704,42 @@ class Daemon:
             return False
         notify("→ Agent", "prompt queued", ms=10000, channel="agent")
         return False
+
+    def _keep(self, job: Job, text: str, polished: str | None = None) -> None:
+        if not self.cfg.recordings_dir:
+            return
+        try:
+            recovery.keep(self.cfg.recordings_dir, job.samples, job.live_text, text, polished)
+        except Exception as exc:
+            log.warning("could not keep the recording: %s", exc)
+
+    def _polish_worker(self) -> None:
+        """The third pass, on its own thread so a slow model never delays a
+        transcription. The raw transcript is shown as preedit meanwhile, and
+        lands as it is when the model is late, fails, or is not trusted."""
+        while True:
+            job, text = self.polishing.get()
+            final = text
+            try:
+                job.preview.update(text)
+                notify("⋯ Polishing", ms=30000, channel="dictate")
+                # Within the delivery budget, with a second left for landing.
+                wait = min(self.cfg.polish.max_wait_seconds, self._budget(job) - 1.0)
+                cleaned = self.polisher.polish(text, wait) if wait > 0 else None
+                if cleaned is not None:
+                    final = cleaned
+            except Exception:
+                log.exception("polish failed")
+            finally:
+                self._keep(job, text, final)
+                if final:
+                    self.deliveries.put((job, final))  # before task_done: no gap for the gate
+                else:
+                    job.preview.clear()
+                    self.spacing.landed(job.window_id)
+                    notify("voicekey", "nothing to type after cleanup", channel="dictate")
+                self.polishing.task_done()
+                self._settle_gate()
 
     def _delivery_worker(self) -> None:
         """Landing on its own thread: a slow Emacs, a hung wl-copy or a long

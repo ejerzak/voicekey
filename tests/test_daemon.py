@@ -302,6 +302,107 @@ class WorkerTests(unittest.TestCase):
         self.assertFalse(self.daemon.spacing.landing_in(7))
 
 
+class PolishStageTests(unittest.TestCase):
+    """With a polish model configured, a third worker sits between
+    transcription and delivery: the raw transcript is shown meanwhile and
+    lands unchanged whenever the model is late, fails or is not trusted."""
+
+    def setUp(self):
+        _no_real_recovery_file(self)
+        self.daemon = Daemon(Config())
+        self.daemon.backend = Mock()
+        self.daemon.backend.transcribe.return_value = "hello"
+        self.daemon.polisher = Mock()
+        self.daemon.polisher.polish.return_value = "Hello."
+
+    def _polish(self, job):
+        self.daemon.spacing.queued(job.window_id)
+        self.assertTrue(self.daemon._process(job))
+        self.assertTrue(self.daemon._landing(), "the gate stays held while the model works")
+        threading.Thread(target=self.daemon._polish_worker, daemon=True).start()
+        self.daemon.polishing.join()
+
+    @staticmethod
+    def _fresh(job):
+        """Just released, so the delivery budget is whole."""
+        return daemon_mod.replace(job, finished_at=time.monotonic())
+
+    @patch("voicekey.daemon.notify")
+    def test_the_polished_text_is_what_lands(self, _notify):
+        job = self._fresh(_job("dictate", window_id=7))
+        self._polish(job)
+        self.assertEqual(self.daemon.deliveries.get_nowait(), (job, "Hello."))
+        self.assertTrue(self.daemon.spacing.landing_in(7), "still owned by the delivery worker")
+
+    @patch("voicekey.daemon.notify")
+    def test_the_raw_text_is_shown_meanwhile_and_lands_when_the_model_fails(self, _notify):
+        self.daemon.polisher.polish.return_value = None
+        ime = FakeIme()
+        job = self._fresh(_job("dictate", preview=ImePreview(ime, 1), window_id=7))
+        self._polish(job)
+        self.assertEqual(ime.preedits, [("hello", 1)])
+        self.assertEqual(self.daemon.deliveries.get_nowait(), (job, "hello"))
+
+    @patch("voicekey.daemon.notify")
+    def test_a_worker_bug_still_lands_the_raw_text(self, _notify):
+        self.daemon.polisher.polish.side_effect = RuntimeError("bug")
+        job = self._fresh(_job("dictate", window_id=7))
+        self._polish(job)
+        self.assertEqual(self.daemon.deliveries.get_nowait(), (job, "hello"))
+
+    @patch("voicekey.daemon.notify")
+    def test_nothing_left_after_cleanup_lands_nowhere_and_says_so(self, notify):
+        self.daemon.polisher.polish.return_value = ""
+        ime = FakeIme()
+        self._polish(self._fresh(_job("dictate", preview=ImePreview(ime, 1), window_id=7)))
+        self.assertTrue(self.daemon.deliveries.empty())
+        self.assertEqual(ime.preedits[-1], ("", 1), "the preedit is cleared")
+        self.assertFalse(self.daemon.spacing.landing_in(7))
+        self.assertFalse(self.daemon._landing())
+        self.assertIn("nothing to type", str(notify.call_args))
+
+    @patch("voicekey.daemon.notify")
+    @patch("voicekey.daemon.time.monotonic", return_value=8.5)
+    def test_the_wait_fits_inside_the_delivery_budget(self, _clock, _notify):
+        # finished_at is 1.0 and max_delay_seconds 10: 2.5 s of budget left,
+        # one of which delivery needs, so the model gets 1.5 s, not 4.
+        self._polish(_job("dictate", window_id=7))
+        self.daemon.polisher.polish.assert_called_once_with("hello", 1.5)
+
+    @patch("voicekey.daemon.notify")
+    @patch("voicekey.daemon.time.monotonic", return_value=10.5)
+    def test_no_budget_left_means_no_polish(self, _clock, _notify):
+        job = _job("dictate", window_id=7)
+        self._polish(job)
+        self.daemon.polisher.polish.assert_not_called()
+        self.assertEqual(self.daemon.deliveries.get_nowait(), (job, "hello"))
+
+    @patch("voicekey.daemon.notify")
+    def test_agent_prompts_and_empty_transcripts_skip_the_model(self, _notify):
+        self.daemon._process(_job("agent"))
+        self.assertEqual(self.daemon.agent_prompts.get_nowait(), "hello")
+        self.daemon.backend.transcribe.return_value = ""
+        self.assertFalse(self.daemon._process(_job("dictate", window_id=7)))
+        self.assertTrue(self.daemon.polishing.empty())
+        self.daemon.polisher.polish.assert_not_called()
+
+    @patch("voicekey.daemon.notify")
+    @patch("voicekey.daemon.recovery.keep")
+    def test_the_recording_is_kept_once_with_every_transcript(self, keep, _notify):
+        self.daemon.cfg.recordings_dir = "/tmp/recordings"
+        job = self._fresh(_job("dictate", window_id=7))
+        self._polish(job)
+        keep.assert_called_once_with("/tmp/recordings", job.samples, "live", "hello", "Hello.")
+
+    @patch("voicekey.daemon.notify")
+    def test_without_a_model_the_pipeline_is_as_before(self, _notify):
+        self.daemon.polisher = None
+        job = _job("dictate", window_id=7)
+        self.assertTrue(self.daemon._process(job))
+        self.assertTrue(self.daemon.polishing.empty())
+        self.assertEqual(self.daemon.deliveries.get_nowait(), (job, "hello"))
+
+
 class SessionTests(unittest.TestCase):
     @patch("voicekey.daemon.notify")
     @_focused()

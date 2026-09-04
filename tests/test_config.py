@@ -26,6 +26,39 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.agent.tmux_session, "voicekey-hermes")
         self.assertTrue(os.path.isabs(cfg.agent.working_directory))
 
+    def test_polish_is_off_by_default_and_validated_when_on(self):
+        cfg = self._load_text("")
+        self.assertEqual(cfg.polish.backend, "none")
+        self.assertEqual(cfg.polish.server.model_file, "")
+        cfg = self._load_text(
+            '[polish]\nbackend = "openai"\nurl = "http://127.0.0.1:9000/v1/"\n'
+            'style = "formal"\n[polish.server]\nmodel_file = "~/x.gguf"\nthreads = 2\n'
+        )
+        self.assertEqual(cfg.polish.url, "http://127.0.0.1:9000/v1")
+        self.assertEqual(cfg.polish.style, "formal")
+        self.assertEqual(cfg.polish.server.threads, 2)
+        self.assertTrue(os.path.isabs(cfg.polish.server.model_file))
+        self.assertTrue(cfg.polish.server.command.endswith("/voicekey/llama.cpp/llama-server"))
+        self.assertTrue(os.path.isabs(cfg.polish.server.command), "the default path is expanded")
+        cfg = self._load_text('[polish.server]\ncommand = "llama-server"')
+        self.assertEqual(cfg.polish.server.command, "llama-server", "a bare name stays for PATH")
+        for text, message in (
+            ('[polish]\nbackend = "cloud"', "polish.backend"),
+            ('[polish]\nurl = "127.0.0.1:9000"', "polish.url"),
+            ('[polish]\nformat = "chat"', "polish.format"),
+            ('[polish]\nstyle = "academic"', "polish.style"),
+            ('[polish]\nmax_wait_seconds = 0', "polish.max_wait_seconds"),
+            ('[polish]\nserver = 3', "[server]"),
+            ('[polish.server]\nthreads = 1.5', "polish.server.threads"),
+            ('[polish.server]\ncontext = 64', "polish.server.context"),
+            ('[polish]\nnope = 1', "polish.nope"),
+        ):
+            with self.assertRaisesRegex(ConfigError, message, msg=text):
+                self._load_text(text)
+        # Any style goes for our own prompt.
+        self.assertEqual(self._load_text('[polish]\nformat = "instruct"\nstyle = "academic"').polish.style,
+                         "academic")
+
     def test_defaults_enable_live_preview_and_in_field_text(self):
         cfg = self._load_text("")
         self.assertEqual(cfg.backend.type, "parakeet")
