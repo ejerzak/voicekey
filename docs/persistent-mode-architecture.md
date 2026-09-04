@@ -12,14 +12,18 @@ segmenter and ledger are built. `polish.py` (OpenAI-compatible backend, the
 `s1-mini` and `instruct` formats, the judge, the child `llama-server`), a
 polish worker between transcription and delivery, `[polish]` config, tests.
 The default model is S1-mini by Superwhisper, a 0.6B normaliser that runs on
-the laptop CPU in about half a second per sentence; its Fedora runtime is
-the `llama-cpp` package. The Anthropic backend, per-mode profiles and the
-prompt file's context window are still to come. Step 1, the target
-extraction, was done the same day: `target.py` holds the four targets
-(input method, Emacs, wtype, clipboard) behind `bind`, `show`, `before` and
-`land`, the focus guard and the reconciliation of provisional text after
-focus theft; `daemon.py` keeps spacing, budgets, workers and recovery. Steps
-2 to 5 are unchanged.
+the laptop CPU in about half a second per sentence, through a pinned
+upstream llama.cpp build that `--download` fetches (Fedora's `llama-cpp`
+package works but measured three to four times slower). The Anthropic
+backend, per-mode profiles and the prompt file's context window are still
+to come; `recordings_dir` is on since the same day to judge the model on a
+week of real dictation. Step 1, the target extraction, was done the same
+day: `target.py` holds the four targets (input method, Emacs, wtype,
+clipboard) behind `bind`, `show`, `before` and `land`. The focus guard and
+the reconciliation of section 4.7 went with it and already run in
+hold-to-talk mode: delivery waits for the window to come back and
+reconciles what the field kept. `daemon.py` keeps spacing, budgets, workers
+and recovery. Next is step 2, the ledger; steps 2 to 5 are unchanged.
 
 ## 1. What it is
 

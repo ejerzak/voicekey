@@ -2,8 +2,13 @@
 
 Written 2026-09-02 after a full read of the code base (about 3,000 lines of
 source, 130 passing tests) and ten days of journal history (535 recordings).
-Nothing here is built yet. Section 1 is what the audit found; section 2 is
-the plan for the new mode; section 3 is the order of work.
+Section 1 is what the audit found; section 2 is the plan for the new mode;
+section 3 is the order of work.
+
+**Status (2026-09-05).** Sections 2 and 3 are superseded by
+[`persistent-mode-architecture.md`](persistent-mode-architecture.md), whose
+status note says what is built: the audit fixes of section 1, the polish
+pass, and the target extraction. Sections 1 and 4 still stand.
 
 ## 1. Audit
 
