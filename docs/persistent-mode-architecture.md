@@ -14,7 +14,12 @@ polish worker between transcription and delivery, `[polish]` config, tests.
 The default model is S1-mini by Superwhisper, a 0.6B normaliser that runs on
 the laptop CPU in about half a second per sentence; its Fedora runtime is
 the `llama-cpp` package. The Anthropic backend, per-mode profiles and the
-prompt file's context window are still to come. Steps 1 to 5 are unchanged.
+prompt file's context window are still to come. Step 1, the target
+extraction, was done the same day: `target.py` holds the four targets
+(input method, Emacs, wtype, clipboard) behind `bind`, `show`, `before` and
+`land`, the focus guard and the reconciliation of provisional text after
+focus theft; `daemon.py` keeps spacing, budgets, workers and recovery. Steps
+2 to 5 are unchanged.
 
 ## 1. What it is
 
