@@ -60,6 +60,12 @@ class ControllerTests(unittest.TestCase):
             self.assertEqual(self.targets[0].calls[0][0], 'hello')
             self.assertTrue(pending.empty())
 
+    def test_status_during_agent_recording_describes_notification_preview(self):
+        self.daemon.actions[frozenset({ecodes.KEY_F10})] = ('agent', 'hold')
+        self.key(1, ecodes.KEY_F10)
+        self.assertEqual(self.daemon.status()['destination'], 'agent notification')
+        self.daemon.session.cancel()
+
     def test_hold_key_transfers_gate_ownership_through_finalization(self):
         entered, release = threading.Event(), threading.Event()
         self.addCleanup(release.set)

@@ -78,6 +78,9 @@ class NotifyPreview:
             self.closed = True
         return True
 
+    def describe(self) -> str:
+        return f"{LABEL[self.action]} notification"
+
 
 class ImePreview:
     name = "in-field"
