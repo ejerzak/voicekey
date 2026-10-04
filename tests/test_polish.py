@@ -61,29 +61,75 @@ class FormatTests(unittest.TestCase):
 
 
 class ContextTests(unittest.TestCase):
-    def polisher(self, reply):
+    def polisher(self, reply, *alone):
+        """REPLY answers the request with context; ALONE, if given, the retry without it."""
         backend = Mock(chat=Mock(return_value=Reply(reply, True)))
+        if alone:
+            backend.chat.side_effect = [Reply(text, True) for text in (reply, *alone)]
         return Polisher(backend, S1MiniFormat('semi-formal'), 1)
 
     def test_exact_context_is_removed_and_only_new_text_is_returned(self):
         p = self.polisher("I'd like to go to the store.")
         self.assertEqual(p.polish('Go to the store.', 1, context="I'd like to"), 'go to the store.')
         self.assertTrue(p.backend.chat.call_args.args[1].endswith("I'd like to Go to the store."))
+        self.assertEqual(p.last_reason, 'applied')
 
     def test_names_and_i_are_not_mechanically_lowercased(self):
         for context, raw in [('The person is', 'John Smith.'), ('If so,', 'I agree.')]:
             p = self.polisher(context + ' ' + raw)
             self.assertEqual(p.polish(raw, 1, context=context), raw)
 
-    def test_changed_context_missing_context_and_missing_boundary_are_rejected(self):
-        for reply in ('I want to go shopping.', 'go shopping.', "I'd like today.", "I'd like to"):
+    def test_the_models_edits_to_context_are_discarded(self):
+        # Shapes of observed S1-mini replies: it cleans the whole request.
+        for context, raw, reply, new in [
+            ('Some of the flats on that street', 'Could be', 'Some of the flats on that street could be', 'could be'),
+            ('could be', "Reasonable, but I'll look.", "Could be reasonable, but I'll look.", "reasonable, but I'll look."),
+            ('rewrite paragraph five, tighten that.', 'Six is fine.', 'rewrite paragraph 5, tighten that. 6 is fine.',
+             '6 is fine.'),
+            # The dropped 'Um' stays in the buffer; the model's full stop follows it.
+            ('burnt on the bottom, etc. Um', 'Yeah, lowering it makes sense.',
+             'burnt on the bottom, etc. Yeah, lowering it makes sense.', '. Yeah, lowering it makes sense.'),
+            ("I'd like to", 'Go shopping.', 'I want to go shopping.', 'go shopping.'),
+            ("I'd like to", 'Go shopping.', 'go shopping.', 'go shopping.'),
+        ]:
             p = self.polisher(reply)
-            self.assertIsNone(p.polish('Go shopping.', 1, context="I'd like to"))
-            self.assertIn('context', p.last_reason)
-        p = self.polisher("I'd like to go shopping.")
-        self.assertIsNone(p.polish('Go shopping.', 1, context="I'd like to."))
+            self.assertEqual(p.polish(raw, 1, context=context), new, reply)
+            self.assertEqual(p.last_reason, 'applied')
+            self.assertEqual(p.backend.chat.call_count, 1)
 
-    def test_draft_may_rejoin_a_sentence_by_changing_only_the_contexts_final_mark(self):
+    def test_a_mark_where_the_context_ends_without_one_leads_the_new_text(self):
+        for context, raw, reply, new in [
+            ('the question I keep coming back to is', 'What is the cheapest fix?',
+             'the question I keep coming back to is, what is the cheapest fix?', ', what is the cheapest fix?'),
+            ('So, like', "I'm asking", "So, I'm asking", ", I'm asking"),
+            ('the last one leaves around eleven', 'So we can stay.', 'the last one leaves around 11. So we can stay.',
+             '. So we can stay.'),
+            ('the last one leaves around eleven', 'so we can stay.', 'the last one leaves around 11. so we can stay.',
+             '. So we can stay.'),
+        ]:
+            p = self.polisher(reply)
+            self.assertEqual(p.polish(raw, 1, context=context), new, reply)
+            self.assertIsNone(p.last_ending)
+
+    def test_a_mark_already_in_the_buffer_stands_and_the_new_text_follows_it(self):
+        p = self.polisher('cut this kind of repetitive summary of the method.')
+        self.assertEqual(p.polish('Summary of the method.', 1, context='cut this kind of repetitive.'),
+                         'Summary of the method.')
+        p = self.polisher('lighter than the one I have, or a gravel bike.')
+        self.assertEqual(p.polish('Or a gravel bike.', 1, context='lighter than the one I have.'),
+                         'Or a gravel bike.')
+
+    def test_an_unusable_reply_is_retried_without_context(self):
+        for reply in ("I'd like today.", "I'd like to", 'Shopping. I would like to go.'):
+            p = self.polisher(reply, 'Go shopping.')
+            self.assertEqual(p.polish('Go shopping.', 1, context="I'd like to"), 'Go shopping.')
+            self.assertEqual(p.last_reason, 'applied without context: could not separate new text from context')
+            self.assertEqual(p.backend.chat.call_args.args[1], S1MiniFormat('semi-formal').messages('Go shopping.')[1])
+        p = self.polisher("I'd like to", "")
+        self.assertIsNone(p.polish('Go shopping.', 1, context="I'd like to"))
+        self.assertEqual(p.last_reason, 'empty reply')
+
+    def test_draft_may_revise_only_the_contexts_final_marks(self):
         context = "It's possible we should pop into insert mode."
         for reply, ending in ((context[:-1] + " when we're doing dictation.", ''),
                               (context[:-1] + ", when we're doing dictation.", ',')):
@@ -91,22 +137,36 @@ class ContextTests(unittest.TestCase):
             self.assertEqual(p.polish("when we're doing dictation.", 1, context=context, revise_end=True),
                              "when we're doing dictation.")
             self.assertEqual(p.last_ending, ending)
-            # Ordinary dictation's context is already in the buffer: read-only.
-            self.assertIsNone(p.polish("when we're doing dictation.", 1, context=context))
-        for reply in ("It's possible we should pop into normal mode when dictating.",
-                      context[:-1] + "! when dictating.", context[:-1] + "when dictating.",
-                      context[:-1]):
+            # Ordinary dictation's context is already in the buffer: its full
+            # stop stands, so the new text starts a sentence.
             p = self.polisher(reply)
-            self.assertIsNone(p.polish('when dictating.', 1, context=context, revise_end=True))
-            self.assertIn('context', p.last_reason)
+            self.assertEqual(p.polish("when we're doing dictation.", 1, context=context),
+                             "When we're doing dictation.")
+            self.assertIsNone(p.last_ending)
+        p = self.polisher('It works in drafts. Then we accept.')
+        self.assertEqual(p.polish('then we accept.', 1, context='It works in drafts', revise_end=True),
+                         'Then we accept.')
+        self.assertEqual(p.last_ending, '.')
         p = self.polisher(context + ' When dictating.')
         self.assertEqual(p.polish('When dictating.', 1, context=context, revise_end=True), 'When dictating.')
         self.assertIsNone(p.last_ending)
 
+    def test_recorded_s1_mini_replies_keep_their_new_text(self):
+        # Synthetic requests shaped like failures seen in persistent sessions,
+        # with S1-mini's actual replies (2026-10-03). 'old_rule' is what the
+        # exact-prefix check did with them.
+        path = os.path.join(os.path.dirname(__file__), 'data', 'polish_context_replies.json')
+        with open(path, encoding='utf-8') as handle:
+            cases = json.load(handle)
+        for case in cases:
+            p = self.polisher(case['reply'])
+            self.assertEqual(p.polish(case['raw'], 1, context=case['context']), case['new'], case['reply'])
+            self.assertEqual(p.last_reason, 'applied')
+
     def test_words_copied_from_context_into_suffix_are_rejected(self):
-        p = self.polisher('Send it to Ethan. Tomorrow Ethan.')
-        self.assertIsNone(p.polish('Tomorrow.', 1, context='Send it to Ethan.'))
-        self.assertIn('leaked', p.last_reason)
+        p = self.polisher('Send it to Ethan. Tomorrow Ethan.', 'Tomorrow.')
+        self.assertEqual(p.polish('Tomorrow.', 1, context='Send it to Ethan.'), 'Tomorrow.')
+        self.assertEqual(p.last_reason, 'applied without context: previous context leaked into new text')
         p = self.polisher('We agreed. We will go.')
         self.assertEqual(p.polish("We'll go.", 1, context='We agreed.'), 'We will go.')
 

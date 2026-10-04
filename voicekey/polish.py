@@ -23,6 +23,7 @@ import urllib.request
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
+from difflib import SequenceMatcher
 from urllib.parse import urlsplit
 
 from . import recovery
@@ -199,33 +200,99 @@ def context_tail(text: str) -> str:
     return text[start:].strip()
 
 
-def current_reply(reply: Reply, context: str, raw: str, *, revise_end: bool = False) -> tuple[Reply, str | None]:
-    """Enforce a read-only prefix; only the new suffix can reach insertion.
+_FINAL_MARKS = re.compile(r"[.,;:!?—…]*$")
+_LEADING_MARKS = re.compile(r"\s*([.,;:!?—…]*)\s*")
 
-    With REVISE_END (drafts, whose context is not yet in the buffer), the one
-    permitted change to the context is joining a sentence that a pause split:
-    its final . ! or ? may become nothing or , ; : —. The second value is that
-    replacement, or None when the context was kept verbatim.
+
+def final_marks(text: str) -> str:
+    """The run of punctuation that ends TEXT ('' when it ends in a word)."""
+    return _FINAL_MARKS.search(text.rstrip()).group()
+
+
+def _keyed(text: str) -> list[tuple[str, re.Match]]:
+    """Each whitespace-separated token with a comparison key; bare
+    punctuation has no key and takes no part in alignment."""
+    tokens = []
+    for match in re.finditer(r"\S+", text):
+        key = re.sub(r"[^\w']", "", match.group().lower().replace("’", "'"))
+        if key:
+            tokens.append((key, match))
+    return tokens
+
+
+def split_reply(reply: str, context: str, raw: str) -> tuple[str | None, str] | None:
+    """Separate the model's cleanup of CONTEXT + RAW into its two parts.
+
+    The model cleans the whole combined text, so it often edits the context
+    too: a filler dropped, a capital changed, a mark added where the pieces
+    meet. Those edits cannot reach the buffer and are discarded. Words of the
+    reply are aligned with the words of the request; the new text starts after
+    the last word that came from the context. Returns (the punctuation the
+    model put after the context, the new text), the first being None when no
+    context word survived. None when the boundary is ambiguous: a context word
+    after new text, one edit spanning both parts, or a word only the new text
+    has among the discarded part.
     """
-    output = reply.text.strip()
-    ending = None
-    if output.startswith(context):
-        suffix = output[len(context):]
-        if not suffix or not suffix[0].isspace():
-            raise PolishError("previous context boundary changed")
-    elif revise_end and context[-1:] in ".!?" and output.startswith(context[:-1]):
-        joined = re.match(r"([,;:—]?)(\s+\S.*)", output[len(context) - 1:], re.S)
-        if joined is None:
-            raise PolishError("previous context changed")
-        ending, suffix = joined.group(1), joined.group(2)
-    else:
-        raise PolishError("previous context changed")
+    source = [(key, False) for key, _ in _keyed(context)] + [(key, True) for key, _ in _keyed(raw)]
+    tokens = _keyed(reply)
+    new = [None] * len(tokens)  # per reply word: from the new text, the context, or neither
+    matcher = SequenceMatcher(None, [key for key, _ in source], [key for key, _ in tokens], autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            for offset in range(j2 - j1):
+                new[j1 + offset] = source[i1 + offset][1]
+        elif tag == "replace":
+            sides = {source[i][1] for i in range(i1, i2)}
+            if len(sides) > 1:
+                return None
+            new[j1:j2] = [sides.pop()] * (j2 - j1)
+    first = next((j for j, side in enumerate(new) if side), None)
+    if first is None or False in new[first:]:
+        return None
+    last = max((j for j in range(first) if new[j] is False), default=None)
+    if last is None:
+        return None, reply.strip()
+    word = tokens[last][1]
+    # Alignment can file a reordered new word under the context; the
+    # discarded part must not take any word only the new text has.
+    if set(words(reply[:word.end()])) & (set(words(raw)) - set(words(context))):
+        return None
+    joint = _LEADING_MARKS.match(reply, word.end())
+    return final_marks(word.group()) + joint.group(1), reply[joint.end():].strip()
+
+
+def current_reply(reply: Reply, context: str, raw: str, *, revise_end: bool = False) -> tuple[Reply, str | None]:
+    """Only the new text can reach insertion; the context is read-only.
+
+    Where the context ends without punctuation and the model put some there,
+    the new text begins with it (', what is'): the cursor is still at the end
+    of the context, so this adds a mark without editing anything. With
+    REVISE_END (drafts, whose context is not yet in the buffer) the model may
+    instead replace the context's final punctuation; the second value is that
+    replacement, or None when it is unchanged.
+    """
+    split = split_reply(reply.text.strip(), context, raw)
+    if split is None:
+        raise PolishError("could not separate new text from context")
+    wanted, suffix = split
+    if not suffix:
+        raise PolishError("empty reply after context")
+    have = final_marks(context)
+    ending, end, lead = None, have, ""
+    if wanted is not None and wanted != have:
+        if revise_end:
+            ending = end = wanted
+        elif not have:
+            end, lead = wanted, wanted + " "
+    if end and end[-1] in ".!?" and suffix[:1].islower():
+        suffix = suffix[0].upper() + suffix[1:]
+    suffix = lead + suffix
     allowed = set(words(raw))
     for word in list(allowed):
         allowed.update(EXPANSIONS.get(word, "").split())
     if set(words(suffix)) & (set(words(context)) - allowed):
         raise PolishError("previous context leaked into new text")
-    return Reply(suffix.strip(), reply.complete), ending
+    return Reply(suffix, reply.complete), ending
 
 
 def load_prompt(path: str) -> str:
@@ -324,23 +391,38 @@ class Polisher:
                revise_end: bool = False) -> str | None:
         """Cleaned text or None for raw fallback, within the caller's wait.
 
+        With CONTEXT, a reply that cannot be separated from it or fails the
+        judge is retried once on TEXT alone: the model cleans single
+        utterances reliably, so that beats landing the raw transcript.
         After a success, ``last_ending`` is the replacement for the context's
         final punctuation when REVISE_END allowed the model to change it."""
         self.last_ending = None
         style = self.app_styles.get(app_id)
         context = context_tail(context)
-        combined = context + " " + text if context else text
-        system, user = self.format.messages(combined, style)
         started = time.monotonic()
+        timeout = min(self.timeout, wait)
+        deadline = started + timeout
         try:
-            timeout = min(self.timeout, wait)
-            reply = self._slot.call(
-                lambda: self.backend.chat(system, user, max_tokens_for(combined), timeout),
-                started + timeout,
-            )
-            ending = None
+            ending, unusable = None, None
             if context:
-                reply, ending = current_reply(reply, context, text, revise_end=revise_end)
+                reply = self._ask(context + " " + text, style, timeout, deadline)
+                try:
+                    reply, ending = current_reply(reply, context, text, revise_end=revise_end)
+                    unusable = judge(text, reply)
+                except PolishError as exc:
+                    unusable = str(exc)
+                if unusable is not None:
+                    ending = None
+                    log.info("polish context unusable after %.1fs (%s); cleaning without it",
+                             time.monotonic() - started, unusable)
+            if not context or unusable is not None:
+                left = deadline - time.monotonic() if context else timeout
+                reply = self._ask(text, style, left, deadline)
+                reason = judge(text, reply)
+                if reason is not None:
+                    self.last_reason = reason
+                    log.warning("polish rejected: %s", reason)
+                    return None
         except (WorkBusy, WorkTimeout):
             self.last_reason = "request busy or deadline expired"
             log.warning("polish skipped: request busy or deadline expired")
@@ -353,17 +435,17 @@ class Polisher:
             self.last_reason = "request failed"
             log.exception("polish failed")
             return None
-        reason = judge(text, reply)
-        if reason is not None:
-            self.last_reason = reason
-            log.warning("polish rejected: %s", reason)
-            return None
         cleaned = reply.text.strip()
-        self.last_reason = "applied"
+        self.last_reason = "applied" if unusable is None else f"applied without context: {unusable}"
         self.last_ending = ending
         log.info("polished %d -> %d chars in %.2fs", len(text), len(cleaned),
                  time.monotonic() - started)
         return cleaned
+
+    def _ask(self, text: str, style: str | None, timeout: float, deadline: float) -> Reply:
+        system, user = self.format.messages(text, style)
+        return self._slot.call(
+            lambda: self.backend.chat(system, user, max_tokens_for(text), max(0.001, timeout)), deadline)
 
 
 def load_api_key(path: str) -> str | None:

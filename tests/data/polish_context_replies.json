@@ -1,0 +1,142 @@
+[
+ {
+  "context": "We should repot the basil before it gets too hot and the roots start circling",
+  "raw": "The tomatoes can wait until next weekend, I think.",
+  "reply": "We should repot the basil before it gets too hot and the roots start circling. The tomatoes can wait until next weekend, I think.",
+  "new": ". The tomatoes can wait until next weekend, I think.",
+  "old_rule": "refused"
+ },
+ {
+  "context": "I checked the train times this morning and the last one leaves around eleven",
+  "raw": "So we don't need to book a hotel.",
+  "reply": "I checked the train times this morning, and the last one leaves around 11. So we don't need to book a hotel.",
+  "new": ". So we don't need to book a hotel.",
+  "old_rule": "refused"
+ },
+ {
+  "context": "I guess the real question I keep coming back to is",
+  "raw": "What is the cheapest way to fix the brakes without replacing the whole wheel?",
+  "reply": "I guess the real question I keep coming back to is, \"What is the cheapest way to fix the brakes without replacing the whole wheel?\"",
+  "new": ", \"What is the cheapest way to fix the brakes without replacing the whole wheel?\"",
+  "old_rule": "refused"
+ },
+ {
+  "context": "I'm not sure if that's going to be faster or slower",
+  "raw": "I don't know. I mainly just want the bike working by Friday.",
+  "reply": "I'm not sure if that's going to be faster or slower, I don't know. I mainly just want the bike working by Friday.",
+  "new": ", I don't know. I mainly just want the bike working by Friday.",
+  "old_rule": "refused"
+ },
+ {
+  "context": "Yeah, I think we should cut this kind of repetitive.",
+  "raw": "Summary of the method section. It doesn't add anything the reader needs, etc.",
+  "reply": "Yeah, I think we should cut this kind of repetitive. Summary of the method section. It doesn't add anything the reader needs, etc.",
+  "new": "Summary of the method section. It doesn't add anything the reader needs, etc.",
+  "old_rule": "applied"
+ },
+ {
+  "context": "I'd be happy with either a used road bike that is lighter than the one I have.",
+  "raw": "Or a gravel bike. I once almost bought a Surly.",
+  "reply": "I'd be happy with either a used road bike that is lighter than the one I have, or a gravel bike. I once almost bought a Surly.",
+  "new": "Or a gravel bike. I once almost bought a Surly.",
+  "old_rule": "refused"
+ },
+ {
+  "context": "The oven was too hot and the bread came out burnt on the bottom, etc. Um",
+  "raw": "Yeah, so I think lowering it fifteen degrees makes sense.",
+  "reply": "The oven was too hot, and the bread came out burnt on the bottom, etc. Yeah, so I think lowering it 15 degrees makes sense.",
+  "new": ". Yeah, so I think lowering it 15 degrees makes sense.",
+  "old_rule": "refused"
+ },
+ {
+  "context": "Honestly there are a few ways to read the reviewer's comment. So, like",
+  "raw": "I guess what I'm asking is whether we rewrite the intro.",
+  "reply": "Honestly, there are a few ways to read the reviewer's comment. So, I guess what I'm asking is whether we rewrite the intro.",
+  "new": ", I guess what I'm asking is whether we rewrite the intro.",
+  "old_rule": "refused"
+ },
+ {
+  "context": "I'm a bit confused about what to tell the landlord. So like",
+  "raw": "They've always said that when the heater breaks",
+  "reply": "I'm a bit confused about what to tell the landlord. So they've always said that when the heater breaks",
+  "new": "they've always said that when the heater breaks",
+  "old_rule": "refused"
+ },
+ {
+  "context": "it's just, I don't know, every recipe online says something different, but like",
+  "raw": "Is there any real reason to rest the dough overnight?",
+  "reply": "It's just, I don't know, every recipe online says something different, but like, is there any real reason to rest the dough overnight?",
+  "new": ", is there any real reason to rest the dough overnight?",
+  "old_rule": "refused"
+ },
+ {
+  "context": "Some of the flats on that street",
+  "raw": "Could be",
+  "reply": "Some of the flats on that street could be",
+  "new": "could be",
+  "old_rule": "applied"
+ },
+ {
+  "context": "could be",
+  "raw": "Reasonable, but I'll have to see them. I don't have time this week.",
+  "reply": "Could be reasonable, but I'll have to see them. I don't have time this week.",
+  "new": "reasonable, but I'll have to see them. I don't have time this week.",
+  "old_rule": "refused"
+ },
+ {
+  "context": "Yeah, rewrite paragraph five, yeah, tighten that.",
+  "raw": "Six is fine, we can keep it. And yeah, check the references and add two more recent ones",
+  "reply": "Yeah, rewrite paragraph 5, yeah, tighten that. 6 is fine, we can keep it. And yeah, check the references and add two more recent ones.",
+  "new": "6 is fine, we can keep it. And yeah, check the references and add two more recent ones.",
+  "old_rule": "refused"
+ },
+ {
+  "context": "I'd prefer to like just directly book the cabin, if that makes sense.",
+  "raw": "Um I'm not sure if that's cheaper or not",
+  "reply": "I'd prefer to just directly book the cabin, if that makes sense. I'm not sure if that's cheaper or not.",
+  "new": "I'm not sure if that's cheaper or not.",
+  "old_rule": "refused"
+ },
+ {
+  "context": "we kind of know something about the condition of",
+  "raw": "Um for the kayaks, similar thing. Uh",
+  "reply": "We kind of know something about the condition of the kayaks, similar thing.",
+  "new": "the kayaks, similar thing.",
+  "old_rule": "refused"
+ },
+ {
+  "context": "We could just ask people at the start of the meeting and it'll be like",
+  "raw": "Do you want to meet on Tuesdays or would you rather switch to Thursdays is basically the question",
+  "reply": "We could just ask people at the start of the meeting, and it'll be like, \"Do you want to meet on Tuesdays or would you rather switch to Thursdays?\" Is basically the question.",
+  "new": ", \"Do you want to meet on Tuesdays or would you rather switch to Thursdays?\" Is basically the question.",
+  "old_rule": "refused"
+ },
+ {
+  "context": "The person who fixed it was",
+  "raw": "Maria from the hardware shop.",
+  "reply": "The person who fixed it was Maria from the hardware shop.",
+  "new": "Maria from the hardware shop.",
+  "old_rule": "applied"
+ },
+ {
+  "context": "If that works for you,",
+  "raw": "I can bring the ladder on Sunday.",
+  "reply": "If that works for you, I can bring the ladder on Sunday.",
+  "new": "I can bring the ladder on Sunday.",
+  "old_rule": "applied"
+ },
+ {
+  "context": "this is worth",
+  "raw": "putting in a shared spreadsheet. I think what would make more sense is just like a short list we can both edit",
+  "reply": "This is worth putting in a shared spreadsheet. I think what would make more sense is just like a short list we can both edit.",
+  "new": "putting in a shared spreadsheet. I think what would make more sense is just like a short list we can both edit.",
+  "old_rule": "refused"
+ },
+ {
+  "context": "I think the main thing about step three.",
+  "raw": "Like, don't assume the reader has ever used a terminal before. Most of them never have, so we might need to explain each command.",
+  "reply": "I think the main thing about step three. Like, don't assume the reader has ever used a terminal before. Most of them never have, so we might need to explain each command.",
+  "new": "Like, don't assume the reader has ever used a terminal before. Most of them never have, so we might need to explain each command.",
+  "old_rule": "applied"
+ }
+]

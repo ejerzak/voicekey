@@ -150,12 +150,15 @@ class DraftTarget(SessionTarget):
                                                  **({"context": context, "revise_end": True} if context else {})),
                             deadline)
                         if isinstance(cleaned, str) and cleaned.strip() and len(cleaned.encode()) <= MAX_DRAFT_BYTES:
-                            chunk, reason = cleaned, "applied"
-                            # Nothing is inserted yet, so a sentence split by a
-                            # pause may be rejoined: only its final mark changes.
+                            note = getattr(model, "last_reason", None)
+                            chunk, reason = cleaned, note if isinstance(note, str) and note.startswith("applied") else "applied"
+                            # Nothing is inserted yet, so the punctuation where a
+                            # pause split the text may change: only the final marks.
                             ending = getattr(model, "last_ending", None)
-                            if isinstance(ending, str) and text[-1:] in ".!?":
-                                text, reason = text[:-1] + ending, "applied; rejoined the previous sentence"
+                            if isinstance(ending, str):
+                                text = text.rstrip()
+                                text, reason = (text[:len(text) - len(polish.final_marks(text))] + ending,
+                                                "applied; revised the previous text's final punctuation")
                         else:
                             last = getattr(model, "last_reason", None)
                             reason = f"raw fallback: {last if isinstance(last, str) else 'model unavailable or output rejected'}"

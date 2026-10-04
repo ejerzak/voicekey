@@ -67,6 +67,12 @@ tests["normal mode inserts after the cursor character with spacing"] = function(
   assert(lines()[1] == "Kant argued famously this.", lines()[1])
 end
 
+tests["text that starts with punctuation joins the word before it"] = function()
+  buffer({ "I wonder" }, 1, 7)
+  dictate(", what is it?")
+  assert(lines()[1] == "I wonder, what is it?", lines()[1])
+end
+
 tests["empty line receives the transcript unchanged"] = function()
   buffer({ "" }, 1, 0)
   dictate("  Hello there.\n")

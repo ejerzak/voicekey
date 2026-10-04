@@ -196,7 +196,7 @@ function spaced(buf, row, col, text)
   end
   local line = api.nvim_buf_get_lines(buf, row, row + 1, false)[1] or ""
   local before, after = line:sub(col, col), line:sub(col + 1, col + 1)
-  if before ~= "" and not before:match("[%s%(%[{\"'`]") then
+  if before ~= "" and not before:match("[%s%(%[{\"'`]") and not text:match("^[,.;:!?%)%]}]") then
     text = " " .. text
   end
   if after ~= "" and after:match("[%w]") then

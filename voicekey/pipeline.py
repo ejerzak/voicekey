@@ -361,7 +361,8 @@ class Pipeline:
                     cleaned = None  # typing during cleanup made the context stale
                 if isinstance(cleaned, str) and cleaned.strip() and len(cleaned.encode()) <= MAX_TEXT_BYTES:
                     final = cleaned
-                    polish_result = "applied"
+                    note = getattr(polisher, "last_reason", None)
+                    polish_result = note if isinstance(note, str) and note.startswith("applied") else "applied"
                 else:
                     polish_result = "raw fallback: model unavailable or output rejected"
                     reason = ("context invalidated by keyboard activity" if context_stale

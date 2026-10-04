@@ -348,6 +348,16 @@ artifacts are isolated from production; no speech-model refactor was deployed.
    previews take over for the rest of an Emacs session after deactivation.
 4. Add voice editing commands, per-utterance anchors, additional polish
    providers or paragraph rewriting only as actual use demonstrates need.
+5. Under consideration, not built (2026-10-03): hold back each utterance's
+   final `.`, `?` or `!` until the next utterance's cleanup has seen both
+   sides of the pause. A 1.2 s pause often splits a sentence and the model
+   ends the fragment with a full stop ("cut this kind of repetitive." /
+   "Summary of the method…"), which ordinary insertion cannot withdraw. The held mark
+   would be inserted at session end if there was no keyboard activity
+   since, and dropped if the destination changed. Cost: the last mark
+   appears only when speech resumes or the session ends, and delivery gains
+   a session-end insertion. Draft mode already gets this effect from
+   `revise_end`. In the 30 recorded context requests, 2 needed it.
 
 The deterministic suite covers continuous paced WAV capture, sample ownership,
 hard cuts and suffix replay, ordered commits and combined previews, idle gate

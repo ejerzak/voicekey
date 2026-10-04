@@ -240,13 +240,20 @@ earlier dictations, preserving speech order.
 
 By default, continuous dictation supplies the previous delivered batch's ending
 (up to 50 words and 800 characters) to cleanup. S1-mini cleans the combined
-text using its existing prompt; Voicekey requires the entire supplied prefix
-to remain exactly unchanged, removes it from the reply, and validates only the
-new suffix against the current transcript. Changed or missing prefixes and
-context-only words leaking into the suffix cause raw fallback. Earlier text
-is never reinserted or edited. For example, `I'd like to` followed by `Go to
-the store.` can produce the suffix `go to the store.`; an earlier full stop
-cannot be corrected this way. Insertion spacing remains a separate operation.
+text using its existing prompt, and usually edits the context as well: it drops
+a trailing "um", changes a capital, or punctuates where the two parts meet.
+Earlier text is never reinserted or edited, so Voicekey aligns the reply's words
+with the request's, discards the model's version of the context, and validates
+only the new part against the current transcript. Where the context ends
+without punctuation and the model put some there, the new text begins with it:
+`the question I keep coming back to is` followed by `What is the cheapest
+fix?` produces `, what is the cheapest fix?`. An earlier full stop cannot be withdrawn; the new
+text then starts with a capital. A reply that cannot be split cleanly (a
+context word after new words, one edit spanning both parts, new words filed
+under the context), that copies context-only words into the new part, or that
+fails the usual checks is retried once without context, within the same
+timeout; the journal records `applied without context: <reason>`. Insertion
+spacing remains a separate operation.
 
 Context is confined to the same destination within a continuous session. Pending batches are not
 used, and older context is skipped when the immediately preceding batch is
@@ -254,8 +261,8 @@ still awaiting delivery. Detected keyboard activity invalidates context;
 mouse or programmatic cursor movement is not tracked, so this is recent
 Voicekey output, not a snapshot of the editor around the current cursor.
 Model output checks are conservative heuristics, not a guarantee of correct
-cleanup. The larger request uses the existing timeout; a refusal or timeout
-preserves the raw new batch without an additional model call. Set
+cleanup. Both requests share the existing timeout; a timeout, or a refusal of
+the retry, preserves the raw new batch. Set
 `[persistent] polish_context = false` to disable it. The supplied context is
 recorded as `polish_context` in the recovery journal's final event. Agent
 prompts and single-recording stdout/replay do not use this context.

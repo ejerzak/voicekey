@@ -1,7 +1,7 @@
 # Speech-model benchmarks
 
-These scripts exercise ASR only: no microphone, keyboard, compositor, Emacs,
-clipboard or cleanup-model calls. They do not alter the voicekey configuration
+These scripts exercise ASR only (except the cleanup replay below): no
+microphone, keyboard, compositor, Emacs, clipboard or cleanup-model calls. They do not alter the voicekey configuration
 or running service. Models and public audio live under `/tmp` by default.
 
 The [September 6 report](../docs/asr-benchmark-2026-09-06.md) contains the decision
@@ -77,6 +77,20 @@ Memory measurements include warm allocator/workspace retention. PSS is used
 for physical-memory comparisons, alongside RSS and swap in the raw files.
 Measurements immediately after loading can substantially undercount demand-
 paged weights; use the warm measurements after real inference.
+
+## Cleanup context replay
+
+`polish_context_replay.py` is the one script here that exercises cleanup
+instead of ASR. It re-sends every persistent-mode cleanup request that carried
+context (from the recovery journal) to the configured model on a private port,
+and compares the live outcome with what the current code accepts. The replies
+are your dictation: they go to `/tmp` (mode 0600), not the repo.
+`tests/data/polish_context_replies.json` holds synthetic requests of the same
+shapes, with the model's actual replies.
+
+```sh
+~/.local/share/voicekey/venv/bin/python benchmarks/polish_context_replay.py
+```
 
 ## Sources
 

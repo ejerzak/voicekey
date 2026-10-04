@@ -94,9 +94,11 @@ persistent mode, with the preceding draft text as read-only context
 (`persistent.polish_context`). Earlier text is never revised, so the preview is
 stable and cleanup costs the same as ordinary dictation. Unlike ordinary mode,
 typing elsewhere does not invalidate that context: the draft is not buffer text.
-One exception: because nothing is inserted yet, the model may rejoin a sentence
-that a pause split, changing only the final `.`, `!` or `?` of the previous text
-to nothing or `,` `;` `:` `—`. Any other change to earlier text is rejected.
+One exception: because nothing is inserted yet, the punctuation where a pause
+split the text may change: the model's choice replaces the final marks of the
+previous text (`.` to `,` or nothing to rejoin a sentence, nothing to `.` to end
+one). The model's other edits to earlier text are discarded, as in ordinary
+mode.
 
 With cleanup disabled, the draft uses the raw transcript. Model errors and
 rejected responses append the new chunk's raw text. Cleanup is subject to the
