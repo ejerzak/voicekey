@@ -219,17 +219,32 @@ class AgentDispatchTests(unittest.TestCase):
         self.assertFalse(agent._focus_terminal(AgentConfig()))
         run.assert_not_called()
 
-    @patch("voicekey.agent._focus_terminal")
+    @patch("voicekey.agent._focus_terminal", side_effect=[False, True])
     @patch("voicekey.agent._ensure_terminal")
     @patch("voicekey.agent._ensure_session")
-    def test_show_starts_session_and_terminal_then_raises_it(self, session, terminal, focus_terminal):
+    def test_show_without_a_window_starts_session_and_terminal_then_raises_it(
+        self, session, terminal, focus_terminal
+    ):
         cfg = AgentConfig()
         agent.show(cfg)
         session.assert_called_once_with(cfg)
         terminal.assert_called_once_with(cfg)
-        focus_terminal.assert_called_once_with(cfg)
-        session.reset_mock(), terminal.reset_mock()
-        agent.show(cfg, focus_only=True)
+        self.assertEqual(focus_terminal.call_count, 2)
+
+    @patch("voicekey.agent._focus_terminal", return_value=True)
+    @patch("voicekey.agent._ensure_terminal")
+    @patch("voicekey.agent._ensure_session")
+    def test_show_raises_an_open_window_without_session_checks(self, session, terminal, focus_terminal):
+        agent.show(AgentConfig(transport="ssh-over-tailscale"))
+        focus_terminal.assert_called_once()
+        session.assert_not_called()
+        terminal.assert_not_called()
+
+    @patch("voicekey.agent._focus_terminal", return_value=False)
+    @patch("voicekey.agent._ensure_terminal")
+    @patch("voicekey.agent._ensure_session")
+    def test_show_focus_only_never_sets_up(self, session, terminal, focus_terminal):
+        agent.show(AgentConfig(), focus_only=True)
         session.assert_not_called()
         terminal.assert_not_called()
 

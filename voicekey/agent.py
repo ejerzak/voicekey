@@ -671,17 +671,20 @@ def _send_command(cfg: AgentConfig, text: str, *, cancelled=None, deadline=None)
 
 
 def show(cfg: AgentConfig, *, cancelled=None, deadline=None, focus_only=False) -> None:
-    """Start Hermes and its terminal if needed and bring it forward, without a
-    prompt. FOCUS_ONLY skips the session and terminal setup, for when a prompt
-    dispatch already owns them."""
+    """Bring Hermes's terminal forward without a prompt, starting the session
+    and terminal first if needed. An open terminal is raised at once: its
+    attached client proves the session is alive, so the slow (possibly
+    remote) checks are skipped. FOCUS_ONLY never sets anything up, for when
+    a prompt dispatch already owns that."""
     if cfg.target != "hermes":
         raise AgentError("the command agent target has no window to open")
     token = _operation.set((deadline if deadline is not None else time.monotonic() + cfg.ready_timeout,
                             cancelled))
     try:
-        if not focus_only:
-            _ensure_session(cfg)
-            _ensure_terminal(cfg)
+        if _focus_terminal(cfg) or focus_only:
+            return
+        _ensure_session(cfg)
+        _ensure_terminal(cfg)
         _focus_terminal(cfg)
     finally:
         _operation.reset(token)
