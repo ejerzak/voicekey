@@ -176,6 +176,7 @@ class MemoryTests(unittest.TestCase):
         self.d.pipeline._send_agent = Mock()
         self.d._on_key('test', ecodes.KEY_RIGHTALT, 1)
         self.d._on_key('test', ecodes.KEY_RIGHTMETA, 1)
+        self.d._gesture = (self.d.session, time.monotonic() - 1)  # a hold, not a tap
         self.d._on_key('test', ecodes.KEY_RIGHTMETA, 0)
         self.d._on_key('test', ecodes.KEY_RIGHTALT, 0)
         wait_for(lambda: self.d.pipeline._slots['transcribe'].busy)

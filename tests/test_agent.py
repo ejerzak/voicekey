@@ -195,13 +195,49 @@ class AgentDispatchTests(unittest.TestCase):
     @patch(
         "voicekey.agent._run",
         return_value=completed(
-            stdout='[{"app_id":"com.mitchellh.ghostty",'
-            '"title":"Voicekey Hermes"}]'
+            stdout='[{"id":3,"app_id":"com.mitchellh.ghostty","title":"Other"},'
+            '{"id":7,"app_id":"com.mitchellh.ghostty","title":"Voicekey Hermes"}]'
         ),
     )
     def test_remote_terminal_window_is_identified_by_title(self, run, require, compositor):
         cfg = AgentConfig(terminal_title="Voicekey Hermes")
         self.assertTrue(agent._terminal_window_open(cfg))
+        self.assertEqual(agent._terminal_window_id(cfg), 7)
+
+    @patch("voicekey.agent.focus.compositor", return_value="niri")
+    @patch("voicekey.agent._terminal_window_id", return_value=7)
+    @patch("voicekey.agent._require", return_value="/usr/bin/niri")
+    @patch("voicekey.agent._run", return_value=completed())
+    def test_focus_raises_the_titled_terminal_on_niri(self, run, require, window_id, compositor):
+        self.assertTrue(agent._focus_terminal(AgentConfig()))
+        run.assert_called_once_with(
+            ["/usr/bin/niri", "msg", "action", "focus-window", "--id", "7"], timeout=10.0)
+
+    @patch("voicekey.agent.focus.compositor", return_value="sway")
+    @patch("voicekey.agent._run")
+    def test_focus_is_skipped_without_niri(self, run, compositor):
+        self.assertFalse(agent._focus_terminal(AgentConfig()))
+        run.assert_not_called()
+
+    @patch("voicekey.agent._focus_terminal")
+    @patch("voicekey.agent._ensure_terminal")
+    @patch("voicekey.agent._ensure_session")
+    def test_show_starts_session_and_terminal_then_raises_it(self, session, terminal, focus_terminal):
+        cfg = AgentConfig()
+        agent.show(cfg)
+        session.assert_called_once_with(cfg)
+        terminal.assert_called_once_with(cfg)
+        focus_terminal.assert_called_once_with(cfg)
+        session.reset_mock(), terminal.reset_mock()
+        agent.show(cfg, focus_only=True)
+        session.assert_not_called()
+        terminal.assert_not_called()
+
+    @patch("voicekey.agent._ensure_session")
+    def test_show_refuses_the_command_target(self, session):
+        with self.assertRaisesRegex(agent.AgentError, "no window"):
+            agent.show(AgentConfig(target="command", command=["/bin/cat"]))
+        session.assert_not_called()
 
     @patch("voicekey.agent._session_has_client", return_value=True)
     @patch("voicekey.agent.focus.compositor", return_value="sway")

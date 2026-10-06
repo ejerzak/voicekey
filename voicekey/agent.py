@@ -432,6 +432,11 @@ def _terminal_window_open(cfg: AgentConfig) -> bool:
     client count is the best available answer."""
     if focus.compositor() != "niri":
         return _session_has_client(cfg)
+    return _terminal_window_id(cfg) is not None
+
+
+def _terminal_window_id(cfg: AgentConfig) -> int | None:
+    """The niri id of the local terminal showing the session, by title."""
     result = _run(
         [_require("niri"), "msg", "--json", "windows"],
         timeout=cfg.command_timeout,
@@ -446,12 +451,31 @@ def _terminal_window_open(cfg: AgentConfig) -> bool:
         raise AgentError(f"niri returned invalid window data: {exc}")
     if not isinstance(windows, list):
         raise AgentError("niri returned invalid window data: expected a list")
-    return any(
-        isinstance(window, dict)
-        and window.get("app_id") == "com.mitchellh.ghostty"
-        and window.get("title") == cfg.terminal_title
-        for window in windows
+    return next(
+        (
+            window.get("id")
+            for window in windows
+            if isinstance(window, dict)
+            and window.get("app_id") == "com.mitchellh.ghostty"
+            and window.get("title") == cfg.terminal_title
+            and isinstance(window.get("id"), int)
+        ),
+        None,
     )
+
+
+def _focus_terminal(cfg: AgentConfig) -> bool:
+    """Raise the session's terminal; only niri exposes windows to do so."""
+    if not cfg.open_terminal or focus.compositor() != "niri":
+        return False
+    window = _terminal_window_id(cfg)
+    if window is None:
+        return False
+    _run(
+        [_require("niri"), "msg", "action", "focus-window", "--id", str(window)],
+        timeout=cfg.command_timeout,
+    )
+    return True
 
 
 def _client_count(cfg: AgentConfig) -> int:
@@ -644,6 +668,23 @@ def _send_command(cfg: AgentConfig, text: str, *, cancelled=None, deadline=None)
                 process.stdin.close()
     log.info("agent command completed")
     return "Command"
+
+
+def show(cfg: AgentConfig, *, cancelled=None, deadline=None, focus_only=False) -> None:
+    """Start Hermes and its terminal if needed and bring it forward, without a
+    prompt. FOCUS_ONLY skips the session and terminal setup, for when a prompt
+    dispatch already owns them."""
+    if cfg.target != "hermes":
+        raise AgentError("the command agent target has no window to open")
+    token = _operation.set((deadline if deadline is not None else time.monotonic() + cfg.ready_timeout,
+                            cancelled))
+    try:
+        if not focus_only:
+            _ensure_session(cfg)
+            _ensure_terminal(cfg)
+        _focus_terminal(cfg)
+    finally:
+        _operation.reset(token)
 
 
 def send_prompt(cfg: AgentConfig, text: str, *, cancelled=None, deadline=None) -> str:

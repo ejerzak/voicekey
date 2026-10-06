@@ -238,13 +238,14 @@ class Pipeline:
             samples, duration = recorder.stop()
         except RecordingError as exc:
             samples, duration, failure = exc.samples, exc.duration, str(exc)
-        # Discard accidental taps and explicitly cancelled client recordings.
-        if getattr(session, "discard", False) or (duration < self.cfg.min_seconds and not failure
+        # A recording no longer than a key tap holds no speech; explicitly
+        # cancelled recordings (agent-key taps, client cancels) are dropped too.
+        if getattr(session, "discard", False) or (duration < self.cfg.tap_seconds and not failure
                                                     and not getattr(session, "session_id", "")):
             session.cancel()
             session.target.clear()
             self.completed(session.id, "dropped", "Capture cancelled" if getattr(session, "discard", False)
-                           else "Recording shorter than min_seconds")
+                           else "Recording shorter than tap_seconds")
             self.ledger.complete(session.id, "dropped")
             with self._items_lock:
                 self._items.pop(session.id, None)
@@ -527,6 +528,24 @@ class Pipeline:
         else:
             self._complete(job, Outcome.SUBMITTED, lane="agent")
             self.notify("✓ Sent to agent", channel="agent")
+
+    def open_agent(self):
+        """Open or raise the agent without a prompt, off the key listener's
+        thread. It shares the agent slot so it cannot race a dispatch into
+        starting a second session or terminal."""
+        def run():
+            deadline = min(self._stop_at, time.monotonic() + self.cfg.agent.ready_timeout)
+            show = lambda focus_only=False: agent.show(self.cfg.agent, cancelled=self._closed,
+                                                       deadline=deadline, focus_only=focus_only)
+            try:
+                try:
+                    self._slots["agent"].call(show, deadline)
+                except WorkBusy:
+                    show(focus_only=True)  # the dispatch holding the slot ensures the rest
+            except Exception as exc:
+                log.warning("could not open agent: %s", exc)
+                self.notify("voicekey: could not open agent", str(exc), error=True)
+        threading.Thread(target=run, name="agent-open", daemon=True).start()
 
     def close(self, timeout=None):
         if self._closed.is_set():

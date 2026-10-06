@@ -69,7 +69,7 @@ class Daemon:
     def __init__(self, cfg: Config, *, recorder_factory=Recorder, journal=None):
         self.cfg = cfg
         self.actions = {_key_chord(cfg.dictate_key): ("persistent", TAP_HOLD),
-                        _key_chord(cfg.agent_key): ("agent", HOLD)}
+                        _key_chord(cfg.agent_key): ("agent", TAP_HOLD)}
         for chord, action in ((cfg.dictate_toggle_key, "persistent"), (cfg.agent_toggle_key, "agent")):
             if chord:
                 self.actions[_key_chord(chord)] = (action, TOGGLE)
@@ -89,7 +89,7 @@ class Daemon:
         self.client_capture = None
         self._pause_reason = ""
         self._typing_fallback = False
-        self._gesture = None  # (session, key-down time), until its chord is released
+        self._gesture = None  # (tap/hold session, key-down time), until its chord is released
         self.vad = None
         self._vad_slot = Slot("speech-detector")
         self.pressed = {}
@@ -303,7 +303,7 @@ class Daemon:
 
     def bindings(self):
         return [f"{key}={action}({behavior})" for key, action, behavior in (
-            (self.cfg.dictate_key, "dictate", TAP_HOLD), (self.cfg.agent_key, "agent", HOLD),
+            (self.cfg.dictate_key, "dictate", TAP_HOLD), (self.cfg.agent_key, "agent", TAP_HOLD),
             (self.cfg.dictate_toggle_key, "dictate", TOGGLE),
             (self.cfg.agent_toggle_key, "agent", TOGGLE),
             (self.cfg.persistent.key, "persistent", TOGGLE)) if key]
@@ -328,11 +328,10 @@ class Daemon:
         session = self.session
         if value == 0:
             if self._gesture is not None:
-                persistent, started = self._gesture
-                if device == persistent.device and code in persistent.chord:
+                owner, started = self._gesture
+                if device == owner.device and code in owner.chord:
                     self._gesture = None
-                    if persistent is self.persistent and not persistent.stopping.is_set():
-                        persistent.starting_key_released(time.monotonic() - started >= self.cfg.tap_seconds)
+                    self._released(owner, tap=time.monotonic() - started < self.cfg.tap_seconds)
             if (session is not None and session.behavior == HOLD
                     and session.device == device and code in session.chord):
                 self._finish()
@@ -384,16 +383,32 @@ class Daemon:
             if behavior == TOGGLE and chord == session.chord and device == session.device:
                 self._finish()
             return
+        # Capture starts at key-down for taps too; the release decides what it was.
+        started = time.monotonic()
         if action == "persistent":
-            started = time.monotonic()
             instruction = ("release to stop; tap to keep listening" if behavior == TAP_HOLD
                            else "press a dictation key to stop")
             self._start_persistent(device, chord, instruction=instruction)
-            if behavior == TAP_HOLD and self.persistent is not None:
-                self._gesture = (self.persistent, started)
-            return
-        self._start(device, chord, behavior, action,
-                    "press again to stop" if behavior == TOGGLE else "release to stop")
+            owner = self.persistent
+        else:
+            self._start(device, chord, behavior, action,
+                        "release to send; tap to open the agent" if behavior == TAP_HOLD else
+                        "press again to stop" if behavior == TOGGLE else "release to stop")
+            owner = self.session
+        if behavior == TAP_HOLD and owner is not None:
+            self._gesture = (owner, started)
+
+    def _released(self, owner, *, tap):
+        """Resolve a tap/hold key. A tap keeps dictation listening or discards
+        the agent recording and opens the agent; a hold stops dictation or
+        sends the agent recording."""
+        if owner is self.persistent:
+            if not owner.stopping.is_set():
+                owner.starting_key_released(not tap)
+        elif owner is self.session:
+            self._finish(discard=tap)
+            if tap:
+                self.pipeline.open_agent()
 
     def _retire_persistent(self):
         self._pause_reason = self.persistent.reason if self.persistent.paused else ""
@@ -491,7 +506,7 @@ class Daemon:
         notify(f"● Recording ({LABEL[action]})", instruction, ms=60000, channel=action)
         log.info("recording %s (%s)", identity, action)
 
-    def _finish(self):
+    def _finish(self, *, discard=False):
         session = self.session
         if session is None:
             return
@@ -500,8 +515,10 @@ class Daemon:
         recorder.request_stop()
         self.session = None
         self.recorder = self.recorder_factory()
+        session.discard = discard
         self.pipeline.submit(session, recorder, finished_at)
-        notify("⋯ Processing", "microphone stopped", ms=30000, channel=session.action)
+        if not discard:
+            notify("⋯ Processing", "microphone stopped", ms=30000, channel=session.action)
         self._settle_gate()
 
     def _on_device_lost(self, device):

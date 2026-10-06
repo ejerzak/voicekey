@@ -41,7 +41,7 @@ and, if DMS is installed, links its widget: add **Voicekey** in DMS Settings →
 DankBar → Widgets. Keep the checkout, and rerun `./install.sh` after upgrading.
 
 **Default hotkeys:** Right Win (`KEY_RIGHTMETA`) for dictation, Right Alt + Right Win for the agent.
-For the agent chord, hold Right Alt before pressing Right Win.
+For the agent chord, hold Right Alt before pressing Right Win; tap the chord to open the agent without speaking.
 Change `dictate_key` / `agent_key` in the config; keys can include modifier chords.
 Reserve your chosen keys in Niri so apps ignore them (defaults below):
 

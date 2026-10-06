@@ -4,12 +4,11 @@
 # see README "Install".
 
 dictate_key = "KEY_RIGHTMETA" # Right Win/Super: hold to dictate; tap to keep listening; press again to stop
-agent_key   = "KEY_RIGHTALT+KEY_RIGHTMETA" # hold Right Alt, then Right Win; release to send to the agent
+agent_key   = "KEY_RIGHTALT+KEY_RIGHTMETA" # hold Right Alt, then Right Win; release to send to the agent; tap to open it
 dictate_toggle_key = ""    # optional: first press starts, second press stops
 agent_toggle_key   = ""
 language    = "en"
-tap_seconds = 0.25         # releases before this latch dictation on
-min_seconds = 0.3          # minimum single recording (agent/stdout/replay)
+tap_seconds = 0.25         # releases before this are taps; shorter recordings are dropped
 max_seconds = 90.0         # single-recording cap (agent/stdout/replay); dictation uses batch limits
 recordings_dir = ""        # debug: keep wav + live/final transcripts of every recording
 
@@ -89,7 +88,8 @@ context = 2048
 [agent]
 post_transcription_hook = "" # separate from dictation; runs before agent dispatch
 # Hermes lives in its own tmux server, independent of the editor and of
-# voicekey. The agent key opens a terminal only if none is attached; closing
+# voicekey. The agent key opens a terminal only if none is attached (a tap
+# also raises it on niri); closing
 # it detaches without killing Hermes or losing its conversation.
 target = "hermes"
 # Alternative: one local process per prompt, exact UTF-8 transcript on stdin.

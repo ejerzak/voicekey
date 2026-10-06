@@ -29,6 +29,9 @@ class ControllerTests(unittest.TestCase):
         self.daemon.gate = Gate(self.tmp.name + '/lock')
         self.daemon.gate.open()
         self.daemon.backend = Mock(transcribe=Mock(return_value='hello'))
+        # Never reach the real agent, including from shutdown finishing a capture.
+        self.daemon.pipeline._send_agent = Mock()
+        patch('voicekey.pipeline.agent.show').start()
         self.daemon.start_workers()
         self.addCleanup(self.daemon.close)
         self.targets = []
@@ -135,11 +138,57 @@ class ControllerTests(unittest.TestCase):
         self.key(1, ecodes.KEY_RIGHTALT)
         self.key(1, ecodes.KEY_RIGHTMETA)
         self.assertEqual(self.daemon.session.action, 'agent')
-        # Exercise only control; never dispatch a real agent in a test.
-        self.daemon.pipeline._send_agent = Mock()
+        self.daemon._gesture = (self.daemon.session, time.monotonic() - 1)
         self.key(0, ecodes.KEY_RIGHTALT)
         self.key(0, ecodes.KEY_RIGHTMETA)
         self.done()
+
+    def agent_press(self, *, held):
+        self.daemon.pipeline.open_agent = Mock()
+        self.key(1, ecodes.KEY_RIGHTALT)
+        self.key(1, ecodes.KEY_RIGHTMETA)
+        session = self.daemon.session
+        self.assertEqual(session.action, 'agent')
+        if not held:
+            self.cfg.tap_seconds = 10  # keep the tap independent of scheduler delays
+        self.daemon._gesture = (session, time.monotonic() - (1 if held else 0))
+        self.key(0, ecodes.KEY_RIGHTMETA)
+        self.key(0, ecodes.KEY_RIGHTALT)
+        self.done()
+        self.assertIsNone(self.daemon.session)
+        self.assertIsNone(self.daemon._gesture)
+
+    def test_agent_tap_discards_recording_and_opens_agent(self):
+        self.agent_press(held=False)
+        self.daemon.pipeline.open_agent.assert_called_once_with()
+        self.daemon.backend.transcribe.assert_not_called()
+        self.daemon.pipeline._send_agent.assert_not_called()
+        self.assertFalse(self.daemon.gate.held)
+
+    def test_agent_hold_sends_recording_without_opening(self):
+        self.agent_press(held=True)
+        wait_for(lambda: self.daemon.pipeline._send_agent.called)
+        self.daemon.pipeline._send_agent.assert_called_once_with('hello')
+        self.daemon.pipeline.open_agent.assert_not_called()
+
+    def test_open_agent_only_raises_the_terminal_while_a_dispatch_holds_the_slot(self):
+        shown = []
+        def show(cfg, **kwargs):
+            shown.append(kwargs['focus_only'])
+        slot = self.daemon.pipeline._slots['agent']
+        with patch('voicekey.pipeline.agent.show', side_effect=show):
+            self.daemon.pipeline.open_agent()
+            wait_for(lambda: len(shown) == 1 and not slot.busy)
+            release = threading.Event()
+            self.addCleanup(release.set)
+            dispatch = threading.Thread(target=slot.call, args=(lambda: release.wait(2), time.monotonic() + 3))
+            dispatch.start()
+            wait_for(lambda: slot.busy)
+            self.daemon.pipeline.open_agent()
+            wait_for(lambda: len(shown) == 2)
+            release.set()
+            dispatch.join(3)
+        self.assertEqual(shown, [False, True])
 
     def test_disconnect_and_source_exit_preserve_recordings(self):
         self.key(1)
@@ -199,7 +248,7 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(spacing.prefix(7), '')
 
     def test_bindings_describe_configured_keys(self):
-        self.assertEqual(self.daemon.bindings(), ['KEY_RIGHTMETA=dictate(tap/hold)', 'KEY_RIGHTALT+KEY_RIGHTMETA=agent(hold)'])
+        self.assertEqual(self.daemon.bindings(), ['KEY_RIGHTMETA=dictate(tap/hold)', 'KEY_RIGHTALT+KEY_RIGHTMETA=agent(tap/hold)'])
 
     def test_contended_gate_is_retried_during_capture(self):
         import fcntl

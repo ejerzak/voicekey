@@ -160,10 +160,10 @@ from assigning actions to ordinary characters.
 
 | key | meaning |
 |---|---|
-| `dictate_key`, `agent_key` | dictation tap/hold and agent hold keys or chords (`KEY_RIGHTMETA`, `KEY_RIGHTALT+KEY_F23`) |
-| `tap_seconds` | maximum short-tap duration; a release at or above it stops dictation |
+| `dictate_key`, `agent_key` | dictation and agent tap/hold keys or chords (`KEY_RIGHTMETA`, `KEY_RIGHTALT+KEY_F23`) |
+| `tap_seconds` | the one tap/hold boundary: a shorter press is a tap (dictation keeps listening; the agent opens), a longer one a hold (dictation stops; the recording goes to the agent). Single recordings shorter than this are dropped |
 | `dictate_toggle_key`, `agent_toggle_key` | optional press-to-start, press-to-stop keys |
-| `min_seconds`, `max_seconds` | single-recording limits for agent, stdout and ordinary replay |
+| `max_seconds` | single-recording limit for agent, stdout and ordinary replay |
 | `recordings_dir` | keep the audio and both transcripts of every recording (off by default) |
 | `[backend]` | final pass: `parakeet` (CPU) or `faster-whisper` (CUDA), and its model |
 | `[streaming] model_dir` | live-preview model; `""` disables the preview |
@@ -399,6 +399,11 @@ conversation; closing the window only detaches. With
 `transport = "ssh-over-tailscale"`, recording and transcription stay local
 and Hermes runs on another machine over OpenSSH with strict host-key
 checking. Without Hermes installed, the agent key only shows a notification.
+
+Tap the agent key (release within `tap_seconds`) to open Hermes without a
+prompt: voicekey starts the session and terminal if needed and, on niri,
+raises the terminal window. The microphone still starts at key-down, so a
+hold loses nothing; a tap's audio is discarded unheard.
 
 For a different agent, configure a local executable that accepts a prompt on
 stdin. For example (replace the executable and directory with your own):
@@ -847,8 +852,8 @@ with a separate eight-prompt limit for agent dispatch. It reserves recovery spac
 capture (180 seconds by default, including a full `max_seconds` for a new
 recording). Full admission refuses the key-down rather than capturing and
 then discarding it. Recorder failure and keyboard disconnect preserve the
-available samples. Single-recording captures below `min_seconds` are discarded; a short dictation
-tap starts continuous listening.
+available samples. Single-recording captures below `tap_seconds` are discarded; a short dictation
+tap starts continuous listening, and a short agent tap opens the agent.
 A native model that ignores its timeout cannot spawn an unlimited succession
 of replacement threads.
 

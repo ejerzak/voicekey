@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 import re
 import tomllib
 from dataclasses import dataclass, field, fields
 from typing import Any
+
+log = logging.getLogger("voicekey.config")
 
 DEFAULT_PATH = os.path.expanduser("~/.config/voicekey/config.toml")
 MODELS_DIR = "~/.local/share/voicekey"
@@ -165,7 +168,6 @@ class Config:
     agent_toggle_key: str = ""
     language: str = "en"
     tap_seconds: float = 0.25
-    min_seconds: float = 0.3
     max_seconds: float = 90.0
     recordings_dir: str = ""
     backend: BackendConfig = field(default_factory=BackendConfig)
@@ -284,10 +286,9 @@ def _validate(cfg: Config) -> None:
     key_chord_names(cfg.persistent.draft_cancel_key)
     cfg.language = _string("language", cfg.language, allow_empty=True)
     cfg.tap_seconds = _number("tap_seconds", cfg.tap_seconds, minimum=0.01)
-    cfg.min_seconds = _number("min_seconds", cfg.min_seconds)
     cfg.max_seconds = _number("max_seconds", cfg.max_seconds, minimum=0.1)
-    if cfg.min_seconds >= cfg.max_seconds:
-        raise ConfigError("min_seconds must be less than max_seconds")
+    if cfg.tap_seconds >= cfg.max_seconds:
+        raise ConfigError("tap_seconds must be less than max_seconds")
     cfg.recordings_dir = _path("recordings_dir", cfg.recordings_dir)
     configured_keys = [
         frozenset(key_chord_names(key))
@@ -516,6 +517,9 @@ def load(path: str | None = None) -> Config:
     polish = _table(data, "polish")
     _apply(cfg.polish.server, _table(polish, "server"), "polish.server.")
     _apply(cfg.polish, polish, "polish.")
+    if "min_seconds" in data:
+        data.pop("min_seconds")
+        log.warning("min_seconds is retired and ignored; tap_seconds also bounds the shortest recording")
     _apply(cfg, data, "")
     _validate(cfg)
     return cfg

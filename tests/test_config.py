@@ -199,8 +199,13 @@ class ConfigTests(unittest.TestCase):
             self._load_text('[agent]\ntmux_session = "bad/session"\n')
 
     def test_recording_bounds_are_ordered(self):
-        with self.assertRaisesRegex(ConfigError, "min_seconds must be less"):
-            self._load_text("min_seconds = 2\nmax_seconds = 1\n")
+        with self.assertRaisesRegex(ConfigError, "tap_seconds must be less"):
+            self._load_text("tap_seconds = 2\nmax_seconds = 1\n")
+
+    def test_retired_min_seconds_is_ignored(self):
+        with self.assertLogs("voicekey.config", "WARNING"):
+            cfg = self._load_text("min_seconds = 0.3\n")
+        self.assertFalse(hasattr(cfg, "min_seconds"))
 
     def test_voice_keys_must_be_unique(self):
         with self.assertRaisesRegex(
