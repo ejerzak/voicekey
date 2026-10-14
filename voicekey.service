@@ -1,5 +1,5 @@
 [Unit]
-Description=voicekey hold-to-talk dictation and agent dispatch
+Description=voicekey hold-to-talk dictation and Hermes agent key
 PartOf=graphical-session.target
 After=graphical-session.target
 Requisite=graphical-session.target
