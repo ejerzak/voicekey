@@ -29,16 +29,18 @@ from .gate import Gate
 from .ime import ImeUnavailable, InputMethod
 from .listener import KeyboardListener, MODIFIERS
 from .notify import notify
-from .pipeline import Pipeline
+from .pipeline import AGENT_OPEN_SECONDS, Pipeline
 from .persistent import PersistentSession
 from .segment import SpeechDetector
 from .work import Slot
 from .recorder import Recorder
 from .spacing import owed
-from .target import LABEL, ClipboardTarget, NotifyPreview, Window
+from .target import LABEL, ClipboardTarget, NotifyPreview, PendingTarget, RefusedTarget, Window
 
 log = logging.getLogger("voicekey.daemon")
 HOLD, TOGGLE, TAP_HOLD = "hold", "toggle", "tap/hold"
+AGENT_ACTIVATION_WAIT = 1.0
+AGENT_OPENING = "opening"  # an agent capture whose window is not up yet
 
 def _keycode(name: str) -> int:
     code = ecodes.ecodes.get(name)
@@ -391,24 +393,59 @@ class Daemon:
             self._start_persistent(device, chord, instruction=instruction)
             owner = self.persistent
         else:
+            agent_window = None
+            if action == "agent":
+                if focus.compositor() != "niri":
+                    notify("voicekey: agent unavailable", "the agent key needs niri to find the agent's window", error=True)
+                    return
+                agent_window = self.pipeline.focus_agent() or AGENT_OPENING
             self._start(device, chord, behavior, action,
-                        "release to send; tap to open the agent" if behavior == TAP_HOLD else
-                        "press again to stop" if behavior == TOGGLE else "release to stop")
+                        "release to insert; tap only raises the agent" if behavior == TAP_HOLD else
+                        "press again to stop" if behavior == TOGGLE else "release to stop",
+                        agent_window=agent_window)
             owner = self.session
         if behavior == TAP_HOLD and owner is not None:
             self._gesture = (owner, started)
 
     def _released(self, owner, *, tap):
-        """Resolve a tap/hold key. A tap keeps dictation listening or discards
-        the agent recording and opens the agent; a hold stops dictation or
-        sends the agent recording."""
+        """Resolve a tap/hold key. A tap keeps dictation listening, or discards
+        the agent recording, leaving the agent raised; a hold stops either."""
         if owner is self.persistent:
             if not owner.stopping.is_set():
                 owner.starting_key_released(not tap)
         elif owner is self.session:
             self._finish(discard=tap)
-            if tap:
-                self.pipeline.open_agent()
+
+    def _bind_agent(self, window):
+        """Bind a capture to the agent window just raised; its input field
+        activates only after that focus change."""
+        target = target_mod.bind(self.ime, self.cfg.dictation,
+                                 sum(u.gated for u in self.pipeline.ledger.snapshots()) > 1,
+                                 activation_wait=AGENT_ACTIVATION_WAIT)
+        if target.window_id != window:
+            target.cancel()
+            return RefusedTarget(Window(target.window_id, True), target.app_id,
+                                 "The agent window lost focus while binding")
+        return target
+
+    def _open_agent_for(self, pending):
+        """Keep recording while the agent opens, then bind the capture to it."""
+        def ready(window, error):
+            if pending.cancelled.is_set():
+                return
+            try:
+                target = (self._bind_agent(window) if window is not None
+                          else RefusedTarget(Window(None, True), None, f"The agent did not open: {error}"))
+            except Exception as exc:
+                log.exception("agent binding failed")
+                target = RefusedTarget(Window(None, True), None, f"The agent window could not be bound: {exc}")
+            if reason := getattr(target, "binding_refusal", ""):
+                notify("voicekey: destination refused", f"{reason}. Final text will be saved and copied if possible.",
+                       attention=True)
+            else:
+                target.prefix = owed(target.before(0.0), self.pipeline.spacing.prefix(target.window_id))
+            pending.attach(target)
+        self.pipeline.open_agent(on_ready=ready)
 
     def _retire_persistent(self):
         self._pause_reason = self.persistent.reason if self.persistent.paused else ""
@@ -459,7 +496,7 @@ class Daemon:
             self._settle_gate()
             notify("voicekey: persistent capture failed", str(exc), error=True)
 
-    def _start(self, device, chord, behavior, action, instruction):
+    def _start(self, device, chord, behavior, action, instruction, *, agent_window=None):
         try:
             self._ensure_models()
         except ValueError as exc:
@@ -470,8 +507,7 @@ class Daemon:
             notify("voicekey: busy", "recording did not start; pending work or recovery storage is full", attention=True, ms=3000)
             return
         session = Session(action, behavior, chord, device, identity=identity, on_text=self.pipeline.ledger.live)
-        if action == "dictate":
-            session.target = ClipboardTarget(NotifyPreview(action), Window(None, True), None)
+        session.target = ClipboardTarget(NotifyPreview(action), Window(None, True), None)
         self.session = session
         self._settle_gate()
         try:
@@ -484,15 +520,25 @@ class Daemon:
             notify("voicekey: recording failed", str(exc), error=True)
             return
         try:
-            if action == "dictate":
+            if agent_window == AGENT_OPENING:
+                # Listening never waits for the window: the transcript lands
+                # once the agent is up, within its own opening allowance.
+                session.target = PendingTarget(action, "the agent window")
+                session.processing_seconds = AGENT_OPEN_SECONDS + self.cfg.dictation.max_delay_seconds
+                notify("Opening the agent", "keep holding to dictate; the text goes in once it is up",
+                       ms=5000, channel="agent")
+                self._open_agent_for(session.target)
+            elif agent_window is not None:
+                session.target = self._bind_agent(agent_window)
+            else:
                 session.target = target_mod.bind(self.ime, self.cfg.dictation,
                                                   sum(u.gated for u in self.pipeline.ledger.snapshots()) > 1)
-                if reason := getattr(session.target, "binding_refusal", ""):
-                    notify("voicekey: destination refused",
-                           f"{reason}. Recording for recovery; nothing will be typed. "
-                           "Final text will be saved and copied if possible.", attention=True)
-                session.target.prefix = owed(session.target.before(0.0),
-                                             self.pipeline.spacing.prefix(session.target.window_id))
+            if reason := getattr(session.target, "binding_refusal", ""):
+                notify("voicekey: destination refused",
+                       f"{reason}. Recording for recovery; nothing will be typed. "
+                       "Final text will be saved and copied if possible.", attention=True)
+            session.target.prefix = owed(session.target.before(0.0),
+                                         self.pipeline.spacing.prefix(session.target.window_id))
             if self.streaming is not None:
                 if self._live_session is None or not self._live_session.stuck:
                     session.attach(self.streaming.session)

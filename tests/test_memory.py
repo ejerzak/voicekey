@@ -173,7 +173,8 @@ class MemoryTests(unittest.TestCase):
             release.wait(3)
             self.install_models()
         patch.object(self.d, '_load_models', side_effect=load).start()
-        self.d.pipeline._send_agent = Mock()
+        patch('voicekey.daemon.focus.compositor', return_value='niri').start()
+        self.d.pipeline.focus_agent = Mock(return_value=1)
         self.d._on_key('test', ecodes.KEY_RIGHTALT, 1)
         self.d._on_key('test', ecodes.KEY_RIGHTMETA, 1)
         self.d._gesture = (self.d.session, time.monotonic() - 1)  # a hold, not a tap
@@ -182,7 +183,7 @@ class MemoryTests(unittest.TestCase):
         wait_for(lambda: self.d.pipeline._slots['transcribe'].busy)
         release.set()
         wait_for(lambda: not self.d.pipeline.ledger.busy)
-        self.d.pipeline._send_agent.assert_called_once_with('Saved words.')
+        self.assertEqual(self.insert.call_args.args[0], 'Saved words.')
 
     def test_shutdown_during_loading_stops_capture_and_cleans_late_child(self):
         session, release = self.cold_start()

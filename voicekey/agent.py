@@ -1,8 +1,10 @@
-"""Dispatch voice prompts to persistent Hermes or a local stdin command.
+"""Start, open and raise the persistent Hermes terminal.
 
 Hermes runs in a dedicated tmux server supervised by a transient systemd user
 unit.  Ghostty is only a client: closing its window detaches from tmux without
-stopping Hermes.  Prompt text enters tmux through stdin, never argv or logs.
+stopping Hermes.  Voicekey never types prompts through tmux: an agent capture
+raises this terminal and dictates into it like any other window, and the user
+presses Enter.
 """
 
 from __future__ import annotations
@@ -11,11 +13,8 @@ import json
 import contextvars
 import logging
 import os
-import re
 import shlex
 import shutil
-import signal
-import selectors
 import subprocess
 import time
 from pathlib import Path
@@ -25,9 +24,6 @@ from .config import AgentConfig
 
 log = logging.getLogger("voicekey.agent")
 
-_EMPTY_PLACEHOLDERS = ("Ask me anything", 'Try "')
-_PROMPT_ONLY_RE = re.compile(r"^\s*(?:[A-Za-z0-9_-]+\s+)?[❯>$#›»→]\s*$")
-_READY_RE = re.compile(r"(?:^|[─\s])ready(?:\s|│|$)", re.MULTILINE)
 _POLL_SECONDS = 0.2
 _operation = contextvars.ContextVar("voicekey_agent_operation", default=(float("inf"), None))
 
@@ -172,15 +168,7 @@ def _remote_executable(cfg: AgentConfig, command: str) -> str:
 
 
 def check_target(cfg: AgentConfig) -> str | None:
-    """Check availability; never execute the configured command backend."""
-    if cfg.target == "command":
-        if not cfg.command or shutil.which(cfg.command[0]) is None:
-            return "agent command executable not found or not executable"
-        if not Path(cfg.working_directory).is_dir():
-            return "agent command working directory does not exist or is not a directory"
-        if not os.access(cfg.working_directory, os.X_OK):
-            return "agent command working directory is not accessible"
-        return None
+    """Check that a remote Hermes host is reachable and equipped."""
     if not _remote(cfg):
         return None
     try:
@@ -307,10 +295,6 @@ def _session_target(cfg: AgentConfig) -> str:
     # accepts it for has-session but rejects it for session set-option and
     # resolves it incorrectly for some target-pane commands.
     return cfg.tmux_session
-
-
-def _pane_target(cfg: AgentConfig) -> str:
-    return f"{cfg.tmux_session}:0.0"
 
 
 def _ensure_session(cfg: AgentConfig) -> bool:
@@ -464,18 +448,19 @@ def _terminal_window_id(cfg: AgentConfig) -> int | None:
     )
 
 
-def _focus_terminal(cfg: AgentConfig) -> bool:
-    """Raise the session's terminal; only niri exposes windows to do so."""
-    if not cfg.open_terminal or focus.compositor() != "niri":
-        return False
+def _focus_terminal(cfg: AgentConfig) -> int | None:
+    """Raise the session's terminal and return its niri window id, or None
+    when it is not open; only niri exposes windows to do so."""
+    if focus.compositor() != "niri":
+        return None
     window = _terminal_window_id(cfg)
     if window is None:
-        return False
+        return None
     _run(
         [_require("niri"), "msg", "action", "focus-window", "--id", str(window)],
         timeout=cfg.command_timeout,
     )
-    return True
+    return window
 
 
 def _client_count(cfg: AgentConfig) -> int:
@@ -497,217 +482,28 @@ def _session_has_client(cfg: AgentConfig) -> bool:
     return _client_count(cfg) > 0
 
 
-def _empty_composer(screen: str) -> bool:
-    """Recognize Hermes's idle, empty composer without parsing private text."""
-    if not _READY_RE.search(screen):
-        return False
-    # The composer and an optional bottom status bar occupy the final few rows.
-    # Looking farther back risks mistaking quoted response text for a prompt.
-    tail = screen.splitlines()[-5:]
-    return any(marker in "\n".join(tail) for marker in _EMPTY_PLACEHOLDERS) or any(
-        _PROMPT_ONLY_RE.fullmatch(line) for line in tail
-    )
-
-
-def _wait_for_empty_composer(cfg: AgentConfig) -> None:
-    deadline = time.monotonic() + cfg.ready_timeout
-    while True:
-        if _tmux(
-            cfg, "has-session", "-t", _session_target(cfg), check=False
-        ).returncode != 0:
-            raise AgentError("Hermes exited before the prompt could be delivered")
-        screen = _tmux(
-            cfg, "capture-pane", "-p", "-t", _pane_target(cfg)
-        ).stdout
-        if _empty_composer(screen):
-            return
-        if time.monotonic() >= deadline:
-            raise AgentError(
-                "Hermes did not reach an idle, empty composer within "
-                f"{cfg.ready_timeout:.0f}s; it may be running, awaiting input, "
-                "or contain a textual draft"
-            )
-        time.sleep(_POLL_SECONDS)
-
-
-def _wait_for_composer_text(cfg: AgentConfig) -> None:
-    """Wait for Hermes's asynchronous bracketed-paste handler to commit."""
-    deadline = time.monotonic() + cfg.command_timeout
-    while time.monotonic() < deadline:
-        screen = _tmux(
-            cfg, "capture-pane", "-p", "-t", _pane_target(cfg)
-        ).stdout
-        if not _empty_composer(screen):
-            return
-        time.sleep(_POLL_SECONDS)
-    raise AgentError("Hermes did not place the voice prompt in its composer")
-
-
-def _wait_for_submission_started(cfg: AgentConfig) -> None:
-    """Confirm Enter cleared the composer or moved Hermes out of ready state."""
-    deadline = time.monotonic() + cfg.command_timeout
-    while time.monotonic() < deadline:
-        screen = _tmux(
-            cfg, "capture-pane", "-p", "-t", _pane_target(cfg)
-        ).stdout
-        if _empty_composer(screen) or not _READY_RE.search(screen):
-            return
-        time.sleep(_POLL_SECONDS)
-    raise AgentError("Hermes did not submit the voice prompt")
-
-
-def _safe_prompt(text: str) -> str:
-    # Speech transcripts should be one logical line. Collapsing whitespace
-    # removes terminal control characters rather than injecting them into a PTY.
-    prompt = " ".join(text.split())
-    if not prompt:
-        raise AgentError("agent transcript was empty")
-    # Hermes handles leading / and ! as local slash/shell commands and treats
-    # absolute paths as file drops. Give those transcripts an ordinary prose
-    # prefix. It also executes `{!...}` interpolation anywhere in a message.
-    if prompt[0] in "/!":
-        prompt = "Voice request: " + prompt
-    prompt = prompt.replace("{!", "{ !")
-    # A trailing space prevents Hermes's path completer from intercepting the
-    # Enter intended to submit. It is semantically inert agent input.
-    return prompt + " "
-
-
-def _paste_prompt(cfg: AgentConfig, text: str) -> None:
-    buffer_name = "voicekey-prompt"
-    prompt = _safe_prompt(text)
-    _tmux(
-        cfg,
-        "load-buffer",
-        "-b",
-        buffer_name,
-        "-",
-        input_text=prompt,
-    )
-    _tmux(
-        cfg,
-        "paste-buffer",
-        "-p",
-        "-d",
-        "-b",
-        buffer_name,
-        "-t",
-        _pane_target(cfg),
-    )
-    _wait_for_composer_text(cfg)
-    _tmux(cfg, "send-keys", "-t", _pane_target(cfg), "Enter")
-    _wait_for_submission_started(cfg)
-
-
-def _send_command(cfg: AgentConfig, text: str, *, cancelled=None, deadline=None) -> str:
-    """Send exact UTF-8 text via stdin; child output may contain private text."""
-    if cfg.transport != "local":
-        raise AgentError("command target requires local transport")
-    if not text.strip():
-        raise AgentError("agent transcript was empty")
-    expires = min(time.monotonic() + cfg.command_timeout,
-                  deadline if deadline is not None else time.monotonic() + cfg.ready_timeout)
-
-    def check_operation():
-        if cancelled is not None and cancelled.is_set():
-            raise AgentError("agent command cancelled")
-        if time.monotonic() >= expires:
-            raise AgentError("agent command timed out")
-
-    check_operation()
-    error = check_target(cfg)
-    if error:
-        raise AgentError(error)
-    process = None
+def raise_terminal(cfg: AgentConfig, *, deadline: float) -> int | None:
+    """Raise an open Hermes terminal at once, setting nothing up; return its
+    niri window id, or None when no terminal is open."""
+    token = _operation.set((deadline, None))
     try:
-        check_operation()
-        process = subprocess.Popen(
-            cfg.command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, cwd=cfg.working_directory,
-            start_new_session=True,
-        )
-        payload = memoryview(text.encode("utf-8"))
-        os.set_blocking(process.stdin.fileno(), False)
-        with selectors.DefaultSelector() as selector:
-            selector.register(process.stdin, selectors.EVENT_WRITE)
-            while payload:
-                check_operation()
-                if not selector.select(0.05):
-                    continue
-                try:
-                    written = os.write(process.stdin.fileno(), payload[:4096])
-                except BlockingIOError:
-                    continue
-                except BrokenPipeError:
-                    raise AgentError("agent command closed stdin before receiving the transcript") from None
-                payload = payload[written:]
-        process.stdin.close()
-        while True:
-            check_operation()
-            try:
-                process.wait(timeout=0.05)
-                break
-            except subprocess.TimeoutExpired:
-                pass
-        check_operation()
-        if process.returncode != 0:
-            raise AgentError(f"agent command exited with status {process.returncode}")
-    except (OSError, ValueError, UnicodeError):
-        # Do not surface child output, argv, or exception data containing input.
-        raise AgentError("could not run agent command") from None
-    finally:
-        if process is not None:
-            # Stop members of the original group even if the child has exited.
-            # Wrappers must not detach children into new groups or sessions.
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait()
-            if process.stdin is not None:
-                process.stdin.close()
-    log.info("agent command completed")
-    return "Command"
-
-
-def show(cfg: AgentConfig, *, cancelled=None, deadline=None, focus_only=False) -> None:
-    """Bring Hermes's terminal forward without a prompt, starting the session
-    and terminal first if needed. An open terminal is raised at once: its
-    attached client proves the session is alive, so the slow (possibly
-    remote) checks are skipped. FOCUS_ONLY never sets anything up, for when
-    a prompt dispatch already owns that."""
-    if cfg.target != "hermes":
-        raise AgentError("the command agent target has no window to open")
-    token = _operation.set((deadline if deadline is not None else time.monotonic() + cfg.ready_timeout,
-                            cancelled))
-    try:
-        if _focus_terminal(cfg) or focus_only:
-            return
-        _ensure_session(cfg)
-        _ensure_terminal(cfg)
-        _focus_terminal(cfg)
+        return _focus_terminal(cfg)
     finally:
         _operation.reset(token)
 
 
-def send_prompt(cfg: AgentConfig, text: str, *, cancelled=None, deadline=None) -> str:
-    """Dispatch TEXT and return the user-visible target."""
-    if cfg.target == "command":
-        return _send_command(cfg, text, cancelled=cancelled, deadline=deadline)
-    if cfg.target != "hermes":
-        raise AgentError(f"unsupported agent target: {cfg.target}")
-    token = _operation.set((deadline if deadline is not None else time.monotonic() + cfg.ready_timeout,
-                            cancelled))
+def show(cfg: AgentConfig, *, cancelled=None, deadline: float) -> int | None:
+    """Bring Hermes's terminal forward, starting the session and terminal
+    first if needed, and return its niri window id. An open terminal is
+    raised at once: its attached client proves the session is alive, so the
+    slow (possibly remote) checks are skipped."""
+    token = _operation.set((deadline, cancelled))
     try:
+        window = _focus_terminal(cfg)
+        if window is not None:
+            return window
         _ensure_session(cfg)
         _ensure_terminal(cfg)
-        _wait_for_empty_composer(cfg)
-        _paste_prompt(cfg, text)
+        return _focus_terminal(cfg)
     finally:
         _operation.reset(token)
-    log.info(
-        "queued agent prompt (%d chars) in Hermes session %s",
-        len(text),
-        cfg.tmux_session,
-    )
-    return f"Hermes — {cfg.tmux_session}"

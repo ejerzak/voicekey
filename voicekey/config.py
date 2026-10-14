@@ -18,7 +18,6 @@ BACKEND_TYPES = {"faster-whisper", "parakeet"}
 POLISH_BACKENDS = {"none", "openai"}
 POLISH_FORMATS = {"s1-mini", "instruct"}
 S1_MINI_STYLES = ("casual", "semi-casual", "semi-formal", "formal")
-AGENT_TARGETS = {"hermes", "command"}
 AGENT_TRANSPORTS = {"local", "ssh-over-tailscale"}
 TMUX_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,48}$")
 REMOTE_HOST_RE = re.compile(
@@ -141,10 +140,8 @@ class PipelineConfig:
 
 @dataclass
 class AgentConfig:
-    """Persistent Hermes or a local command accepting transcripts on stdin."""
+    """The persistent Hermes session and the terminal agent captures type into."""
 
-    target: str = "hermes"
-    command: list[str] = field(default_factory=list)
     transport: str = "local"
     remote_host: str = ""
     remote_user: str = ""
@@ -156,7 +153,6 @@ class AgentConfig:
     terminal_title: str = "Voicekey Hermes"
     open_terminal: bool = True
     command_timeout: float = 10.0
-    ready_timeout: float = 300.0
     post_transcription_hook: str = ""
 
 
@@ -375,71 +371,52 @@ def _validate(cfg: Config) -> None:
     if p.max_utterance_seconds + 4 > cfg.pipeline.max_audio_seconds:
         raise ConfigError("pipeline.max_audio_seconds must allow a persistent utterance plus 4 seconds")
 
-    cfg.agent.target = _string("agent.target", cfg.agent.target)
-    if cfg.agent.target not in AGENT_TARGETS:
-        raise ConfigError(
-            f"agent.target must be one of {', '.join(sorted(AGENT_TARGETS))}, "
-            f"got {cfg.agent.target!r}"
-        )
     cfg.agent.transport = _string("agent.transport", cfg.agent.transport)
-    if not isinstance(cfg.agent.command, list) or any(
-        not isinstance(arg, str) or "\0" in arg for arg in cfg.agent.command
-    ):
-        raise ConfigError("agent.command must be an array of strings without NUL bytes")
-    if cfg.agent.command:
-        executable = _string("agent.command executable", cfg.agent.command[0])
-        cfg.agent.command[0] = _path("agent.command executable", executable) if "/" in executable else executable
-    if cfg.agent.target == "command":
-        if not cfg.agent.command:
-            raise ConfigError("agent.command requires an executable and optional arguments")
-        if cfg.agent.transport != "local":
-            raise ConfigError("agent.target = 'command' requires agent.transport = 'local'")
     if cfg.agent.transport not in AGENT_TRANSPORTS:
         raise ConfigError(
             "agent.transport must be one of "
             f"{', '.join(sorted(AGENT_TRANSPORTS))}, "
             f"got {cfg.agent.transport!r}"
         )
-    if cfg.agent.target == "hermes":
-        cfg.agent.remote_host = _string(
-            "agent.remote_host", cfg.agent.remote_host, allow_empty=True
-        )
-        cfg.agent.remote_user = _string(
-            "agent.remote_user", cfg.agent.remote_user, allow_empty=True
-        )
-        cfg.agent.identity_file = _string(
-            "agent.identity_file", cfg.agent.identity_file, allow_empty=True
-        )
-        if cfg.agent.transport == "ssh-over-tailscale":
-            if not REMOTE_HOST_RE.fullmatch(cfg.agent.remote_host):
-                raise ConfigError(
-                    "agent.remote_host must be a MagicDNS name for "
-                    "ssh-over-tailscale"
-                )
-            if not REMOTE_USER_RE.fullmatch(cfg.agent.remote_user):
-                raise ConfigError(
-                    "agent.remote_user must be a Linux user name for "
-                    "ssh-over-tailscale"
-                )
-            if not cfg.agent.identity_file:
-                raise ConfigError(
-                    "agent.identity_file is required for ssh-over-tailscale"
-                )
-            cfg.agent.identity_file = os.path.abspath(
-                os.path.expanduser(cfg.agent.identity_file)
-            )
-        elif cfg.agent.remote_host or cfg.agent.remote_user or cfg.agent.identity_file:
+    cfg.agent.remote_host = _string(
+        "agent.remote_host", cfg.agent.remote_host, allow_empty=True
+    )
+    cfg.agent.remote_user = _string(
+        "agent.remote_user", cfg.agent.remote_user, allow_empty=True
+    )
+    cfg.agent.identity_file = _string(
+        "agent.identity_file", cfg.agent.identity_file, allow_empty=True
+    )
+    if cfg.agent.transport == "ssh-over-tailscale":
+        if not REMOTE_HOST_RE.fullmatch(cfg.agent.remote_host):
             raise ConfigError(
-                "agent remote fields require "
-                "agent.transport = 'ssh-over-tailscale'"
+                "agent.remote_host must be a MagicDNS name for "
+                "ssh-over-tailscale"
             )
-        for name in ("tmux_socket", "tmux_session"):
-            value = _string(f"agent.{name}", getattr(cfg.agent, name))
-            if not TMUX_NAME_RE.fullmatch(value):
-                raise ConfigError(
-                    f"agent.{name} must contain 1-48 letters, digits, '_' or '-'"
-                )
-            setattr(cfg.agent, name, value)
+        if not REMOTE_USER_RE.fullmatch(cfg.agent.remote_user):
+            raise ConfigError(
+                "agent.remote_user must be a Linux user name for "
+                "ssh-over-tailscale"
+            )
+        if not cfg.agent.identity_file:
+            raise ConfigError(
+                "agent.identity_file is required for ssh-over-tailscale"
+            )
+        cfg.agent.identity_file = os.path.abspath(
+            os.path.expanduser(cfg.agent.identity_file)
+        )
+    elif cfg.agent.remote_host or cfg.agent.remote_user or cfg.agent.identity_file:
+        raise ConfigError(
+            "agent remote fields require "
+            "agent.transport = 'ssh-over-tailscale'"
+        )
+    for name in ("tmux_socket", "tmux_session"):
+        value = _string(f"agent.{name}", getattr(cfg.agent, name))
+        if not TMUX_NAME_RE.fullmatch(value):
+            raise ConfigError(
+                f"agent.{name} must contain 1-48 letters, digits, '_' or '-'"
+            )
+        setattr(cfg.agent, name, value)
     working_directory = _string("agent.working_directory", cfg.agent.working_directory)
     if "\0" in working_directory:
         raise ConfigError("agent.working_directory may not contain NUL bytes")
@@ -461,22 +438,28 @@ def _validate(cfg: Config) -> None:
     if not working_directory.strip(os.path.sep):  # "/", and "//", which normpath keeps
         raise ConfigError("agent.working_directory may not be the filesystem root")
     cfg.agent.working_directory = working_directory
-    if cfg.agent.target == "hermes":
-        cfg.agent.terminal = _string("agent.terminal", cfg.agent.terminal)
-        if cfg.agent.terminal != "ghostty":
-            raise ConfigError("agent.terminal currently supports only 'ghostty'")
-        cfg.agent.terminal_title = _string(
-            "agent.terminal_title", cfg.agent.terminal_title
-        )
-        cfg.agent.open_terminal = _boolean(
-            "agent.open_terminal", cfg.agent.open_terminal
-        )
+    cfg.agent.terminal = _string("agent.terminal", cfg.agent.terminal)
+    if cfg.agent.terminal != "ghostty":
+        raise ConfigError("agent.terminal currently supports only 'ghostty'")
+    cfg.agent.terminal_title = _string(
+        "agent.terminal_title", cfg.agent.terminal_title
+    )
+    cfg.agent.open_terminal = _boolean(
+        "agent.open_terminal", cfg.agent.open_terminal
+    )
     cfg.agent.command_timeout = _number(
         "agent.command_timeout", cfg.agent.command_timeout, minimum=0.1
     )
-    cfg.agent.ready_timeout = _number(
-        "agent.ready_timeout", cfg.agent.ready_timeout, minimum=1.0
-    )
+
+
+def _retire_agent_keys(values) -> None:
+    """Agent prompts are dictated into the Hermes window, never sent."""
+    if values.get("target", "hermes") != "hermes":
+        raise ConfigError("agent.target = 'command' was removed; the agent key now dictates into Hermes")
+    for name in ("target", "command", "ready_timeout"):
+        if name in values:
+            values.pop(name)
+            log.warning("agent.%s is retired and ignored; the agent key dictates into Hermes", name)
 
 
 def load(path: str | None = None) -> Config:
@@ -508,6 +491,8 @@ def load(path: str | None = None) -> Config:
         ("text", cfg.text),
     ):
         values = _table(data, section)
+        if section == "agent":
+            _retire_agent_keys(values)
         if section == "persistent" and "follow_focus" in values:
             legacy = _boolean("persistent.follow_focus", values.pop("follow_focus"))
             if "destination_policy" in values:

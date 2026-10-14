@@ -140,44 +140,27 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(final['overridden'], 'hello hyprwhspr')
         self.assertEqual(final['hook_result'], 'applied')
 
-    def test_agent_uses_own_hook_and_sends_prepared_text(self):
+    def test_agent_uses_own_hook_and_types_prepared_text(self):
         self.cfg.dictation.post_transcription_hook = 'printf WRONG'
         self.cfg.agent.post_transcription_hook = r"sed 's/^/<dictation>/; s/$/<\/dictation>/'"
         self.cfg.text.word_overrides = {'hello': 'Hermes'}
-        send = self.pipeline._send_agent = Mock()
         session = self.submit(action='agent')
         self.done()
-        send.assert_called_once_with('<dictation>Hermes</dictation>')
-        self.assertTrue(session.target.closed)
+        self.assertEqual(session.target.calls[0][0], '<dictation>Hermes</dictation>')
 
-    def test_command_failure_saves_transcript_and_next_prompt_succeeds(self):
-        import sys
-        self.cfg.agent.target = 'command'
-        self.cfg.agent.working_directory = self.tmp.name
-        self.cfg.agent.command = [sys.executable, '-c', 'import sys; sys.stdin.read(); sys.exit(7)']
-        failed = self.submit(action='agent')
-        self.done()
-        self.assertEqual(self.events(failed.id)[-1]['outcome'], 'unknown')
-        self.assertIn('hello', self.journal.path(failed.id, '.txt').read_text())
-        self.cfg.agent.command = [sys.executable, '-c', 'import sys; sys.stdin.read()']
-        success = self.submit(action='agent')
-        self.done()
-        self.assertEqual(self.events(success.id)[-1]['outcome'], 'submitted')
-
-    def test_agent_notification_target_bypasses_polish_and_is_dispatched(self):
+    def test_agent_capture_bypasses_polish_and_lands_in_its_target(self):
         self.cfg.polish.min_words = 0
         self.cfg.polish.app_styles = {'fake': 'formal'}
         self.polisher = Mock()
-        send = self.pipeline._send_agent = Mock()
         session = self.submit(action='agent')
         self.done()
         self.polisher.polish.assert_not_called()
-        send.assert_called_once_with('hello')
+        self.assertEqual(session.target.calls[0][0], 'hello')
         final = next(e for e in self.events(session.id) if e['event'] == 'final')
         self.assertEqual(final['polish_result'], 'agent bypass')
         self.assertEqual(final['polish_style'], self.cfg.polish.style)
         self.assertEqual(final['final'], 'hello')
-        self.assertEqual(self.events(session.id)[-1]['outcome'], 'submitted')
+        self.assertEqual(self.events(session.id)[-1]['outcome'], 'confirmed')
 
     def test_hook_timeout_preserves_order_and_next_dictation(self):
         self.cfg.dictation.post_transcription_hook = 'sleep .4; printf late'
@@ -210,7 +193,7 @@ class PipelineTests(unittest.TestCase):
         session = Session(action, 'hold', frozenset(), 'fake', identity=identity)
         if target is not None:
             session.target = target
-        elif action == 'dictate':
+        else:
             session.target = FakeTarget()
         session.text = live
         self.pipeline.submit(session, FakeRecorder(), time.monotonic() - age)
@@ -259,13 +242,12 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(self.notice.call_args.args[0], '📋 Copied')
         self.assertNotIn('error', self.notice.call_args.kwargs)
 
-    def test_successful_agent_dispatch_is_quiet_but_clipboard_recovery_notifies(self):
-        self.pipeline._send_agent = Mock()
+    def test_successful_agent_capture_is_quiet_but_clipboard_recovery_notifies(self):
         with queued_notifications() as pending:
             self.notice.side_effect = notify
             self.submit(action='agent')
             self.done()
-            self.pipeline.agents.join()
+            self.pipeline.deliveries.join()
             self.assertTrue(pending.empty())
             target = FakeTarget(Outcome.REFUSED)
             target.kind = 'clipboard'
@@ -484,23 +466,3 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(self.journal.path(identity, '.wav').exists())
         self.assertEqual(session.target.calls, [])
 
-    def test_busy_agent_has_its_own_cap_and_does_not_block_dictation(self):
-        entered, release = threading.Event(), threading.Event()
-        self.addCleanup(release.set)
-        self.cfg.pipeline.max_pending = self.pipeline.ledger.max_pending = 1
-        def send(text):
-            entered.set()
-            release.wait(2)
-        self.pipeline._send_agent = Mock(side_effect=send)
-        first = self.submit(action='agent')
-        self.assertTrue(entered.wait(1))
-        self.assertFalse(self.pipeline.ledger.gated)
-        second = self.submit()
-        wait_for(lambda: self.pipeline.ledger.get(second.id) is None)
-        self.assertEqual(second.target.calls[0][0], 'hello')
-        extra = self.submit(action='agent')
-        wait_for(lambda: self.pipeline.ledger.get(extra.id) is None)
-        self.assertEqual(self.events(extra.id)[-1]['outcome'], 'saved')
-        self.assertEqual(self.pipeline._send_agent.call_count, 1)
-        release.set()
-        self.done()

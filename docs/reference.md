@@ -150,7 +150,7 @@ passed in a process argument.
 
 The journal and recovery retain the original formatted transcript. Clipboard
 recovery and `--copy-last` also retain it for deliberate manual use; copying
-does not automatically paste. Agent dispatch and stdout output are unaffected.
+does not automatically paste. Stdout output is unaffected.
 Existing `inject = "wtype"` configurations gain filtering automatically. This
 prevents transcript formatting from becoming Return/Tab keystrokes or terminal
 newline input on restricted paths; it cannot prevent arbitrary applications
@@ -161,7 +161,7 @@ from assigning actions to ordinary characters.
 | key | meaning |
 |---|---|
 | `dictate_key`, `agent_key` | dictation and agent tap/hold keys or chords (`KEY_RIGHTMETA`, `KEY_RIGHTALT+KEY_F23`) |
-| `tap_seconds` | the one tap/hold boundary: a shorter press is a tap (dictation keeps listening; the agent opens), a longer one a hold (dictation stops; the recording goes to the agent). Single recordings shorter than this are dropped |
+| `tap_seconds` | the one tap/hold boundary: a shorter press is a tap (dictation keeps listening; the agent is only raised), a longer one a hold (dictation stops; the recording is typed into the agent). Single recordings shorter than this are dropped |
 | `dictate_toggle_key`, `agent_toggle_key` | optional press-to-start, press-to-stop keys |
 | `max_seconds` | single-recording limit for agent, stdout and ordinary replay |
 | `recordings_dir` | keep the audio and both transcripts of every recording (off by default) |
@@ -176,7 +176,7 @@ from assigning actions to ordinary characters.
 | `[polish]` | third pass: backend, endpoint, format, style, `min_words` (8), `max_wait_seconds` (4) |
 | `[pipeline]` | pending count/audio limits, transcription and shutdown deadlines, recovery quota and history retention |
 | `[polish.server]` | `model_file` makes voicekey run `llama-server` itself, as a child process; `command` names which one |
-| `[agent]` | persistent Hermes (local or SSH via Tailscale), or a local command |
+| `[agent]` | persistent Hermes (local or SSH via Tailscale) and its terminal |
 
 `install.sh` downloads the models the config names and verifies their
 SHA-256 digests.
@@ -390,64 +390,29 @@ in `benchmarks/` also load models for direct performance and memory measurements
 
 ## Agent key (optional)
 
-Hold the agent key, speak, release: the transcript goes to a persistent
-Hermes TUI. On the first dispatch voicekey starts a dedicated tmux server in
-a supervised systemd user unit, runs `hermes --tui` there in a neutral
-working directory, opens a Ghostty window attached to it, and waits for the
-composer to be idle and empty before submitting. Later dispatches reuse the
-conversation; closing the window only detaches. With
-`transport = "ssh-over-tailscale"`, recording and transcription stay local
-and Hermes runs on another machine over OpenSSH with strict host-key
-checking. Without Hermes installed, the agent key only shows a notification.
+Press the agent key and voicekey raises the persistent Hermes terminal; hold
+it, speak and release, and the transcript is typed into Hermes's composer
+like any dictation, with a live preview, but unpolished. Voicekey never
+presses Enter: review the prompt, add to it with further holds or by typing,
+and submit it yourself. Whether Enter during a running Hermes turn interrupts,
+steers or queues is Hermes's `display.busy_input_mode`.
 
-Tap the agent key (release within `tap_seconds`) to open Hermes without a
-prompt: voicekey starts the session and terminal if needed and, on niri,
-raises the terminal window. The microphone still starts at key-down, so a
-hold loses nothing; a tap's audio is discarded unheard.
+A tap (release within `tap_seconds`) only raises the terminal; its audio is
+discarded unheard. If no terminal is open, the press opens one: voicekey
+starts a dedicated tmux server in a supervised systemd user unit if needed,
+runs `hermes --tui` there in a neutral working directory and opens a Ghostty
+window attached to it. A hold keeps listening meanwhile, previewing in a
+notification; once the window is up it takes focus and the text goes in,
+even if you released first. If it never opens, the transcript is saved and
+copied. Closing the window only detaches. With `transport = "ssh-over-tailscale"`,
+recording and transcription stay local and Hermes runs on another machine
+over OpenSSH with strict host-key checking; the local Ghostty forwards typed
+text over ssh.
 
-For a different agent, configure a local executable that accepts a prompt on
-stdin. For example (replace the executable and directory with your own):
-
-```toml
-[agent]
-target = "command"
-transport = "local"
-command = ["/absolute/path/to/agent-wrapper", "--read-stdin"]
-working_directory = "~/projects/my-project"
-command_timeout = 120.0
-ready_timeout = 150.0
-```
-
-`command` is a nonempty array: executable first, then literal arguments. A bare
-executable is resolved on PATH; executable paths and the working directory
-expand `~` and become absolute when config is loaded. The directory must already
-exist. Each prompt starts a fresh process in that directory. The prepared
-transcript (after word overrides and the agent hook) is sent unchanged as UTF-8
-on stdin, followed by EOF, without an added newline. VoiceKey performs no shell
-interpolation or `{text}` substitution and never places the transcript in argv.
-The wrapper must read stdin; its exit status zero means successful submission.
-VoiceKey discards stdout and stderr, since either could echo private text.
-
-`command_timeout` limits the process lifetime; `ready_timeout` is the overall
-agent dispatch budget. The earlier deadline wins. Shutdown cancellation and
-timeouts kill the original process group and reap the child. Members of that
-group are also stopped when the command exits. Wrappers must keep all children
-in the original process group: do not daemonize or create new sessions or
-process groups (for example, with `setsid`, `setpgid`, or
-`start_new_session=True`). Detached processes escape cleanup and may continue
-running after cancellation or timeout. Wrappers must finish their work before
-returning. Command mode uses no tmux, Hermes, Ghostty, or systemd; remote,
-terminal, and tmux options are ignored and validated only for Hermes.
-SSH transport is supported only for Hermes.
-
-Failures, timeouts, and cancellation retain the transcript in the existing
-private recovery journal and report uncertain delivery. VoiceKey does not
-retry automatically: a failing process may already have acted on the prompt.
-Later prompts can still be dispatched. Transcript recovery files are distinct
-from application logs; the command backend logs neither transcripts nor child
-output. `--check` checks executable availability and directory access without
-running the configured command, and exits 3 if only the agent is unavailable.
-It does not verify the command's stdin protocol or external service readiness.
+The agent key needs niri, which lets voicekey find and raise the terminal by
+its title (`terminal_title`). The capture binds to that window as ordinary
+dictation does; if focus has moved elsewhere by then, nothing is typed and
+the transcript is saved and copied.
 
 ## Diagnostics
 
@@ -585,7 +550,7 @@ audio is preserved. Automated replay tests use isolated targets.
 Desktop notifications are reserved for things requiring attention. The status
 indicator (DMS widget, editor UI, or a client of the control socket) handles
 listening, model loading, processing and ordinary stops. Successful insertion
-and agent dispatch do not show popups, and live transcript previews stay in the
+does not show popups, and live transcript previews stay in the
 input field rather than appearing as desktop notifications.
 
 A refused action, such as pressing a dictation key while processing, gives a
@@ -847,13 +812,13 @@ is 256 MB; unresolved records are never automatically deleted to meet it.
 A full or unavailable recovery store disables new recordings until it is
 repaired and the daemon restarted. Files are private to the user.
 
-The pipeline admits at most eight recordings for capture/transcription/dictation,
-with a separate eight-prompt limit for agent dispatch. It reserves recovery space and audio capacity before
+The pipeline admits at most eight recordings for capture/transcription/dictation.
+It reserves recovery space and audio capacity before
 capture (180 seconds by default, including a full `max_seconds` for a new
 recording). Full admission refuses the key-down rather than capturing and
 then discarding it. Recorder failure and keyboard disconnect preserve the
 available samples. Single-recording captures below `tap_seconds` are discarded; a short dictation
-tap starts continuous listening, and a short agent tap opens the agent.
+tap starts continuous listening, and a short agent tap only raises the agent.
 A native model that ignores its timeout cannot spawn an unlimited succession
 of replacement threads.
 
@@ -890,17 +855,12 @@ hook that takes a shared lock before such tools run, waits a bounded time
 and then refuses with a reason can keep cooperating desktop tools out of the way. The lock
 is advisory; voicekey retries acquisition without delaying capture. The
 utterance owns the lock through release finalization and all pipeline stages.
-Agent prompts release their gate ownership once transcription is queued for
-agent dispatch; a busy agent does not lock desktop tools out for minutes.
 
 ## Caveats
 
 - Membership in the `input` group lets every process of your user read raw
   keyboard events. That is the tradeoff for press-and-release on Wayland;
   a minimal privileged helper would be the fix.
-- The agent path infers Hermes's state from its visible TUI, so a Hermes
-  update can break the "never submit into a dialog" guarantee until the
-  patterns are refreshed.
 - Tested on Fedora with niri. The sway and Hyprland focus queries and the
   other listed compositors follow the same protocols but have not been
   exercised.

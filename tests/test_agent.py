@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import subprocess
+import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import call, patch
+from unittest.mock import patch
 
 from voicekey import agent
 from voicekey.config import AgentConfig
@@ -13,88 +14,7 @@ def completed(returncode: int = 0, stdout: str = "", stderr: str = ""):
     return subprocess.CompletedProcess([], returncode, stdout, stderr)
 
 
-class AgentDispatchTests(unittest.TestCase):
-    def test_empty_composer_requires_ready_status_and_empty_input(self):
-        self.assertTrue(agent._empty_composer("─ ready │ gpt-5\n\n❯ "))
-        self.assertTrue(
-            agent._empty_composer("─ ready │ gpt-5\n\n❯ Ask me anything…")
-        )
-        self.assertFalse(agent._empty_composer("─ running… │ gpt-5\n\n❯ "))
-        self.assertFalse(agent._empty_composer("─ ready │ gpt-5\n\n❯ draft"))
-        self.assertFalse(agent._empty_composer("Approve this command?\n1. Yes\n2. No"))
-
-    @patch("voicekey.agent._tmux")
-    @patch("voicekey.agent._wait_for_submission_started")
-    @patch("voicekey.agent._wait_for_composer_text")
-    @patch("voicekey.agent._wait_for_empty_composer")
-    @patch("voicekey.agent._ensure_terminal")
-    @patch("voicekey.agent._ensure_session")
-    def test_prompt_uses_stdin_and_bracketed_paste(
-        self,
-        ensure_session,
-        ensure_terminal,
-        wait_empty,
-        wait_text,
-        wait_submission,
-        tmux,
-    ):
-        prompt = 'quote " and unicode ∇'
-        cfg = AgentConfig()
-        target = agent.send_prompt(cfg, prompt)
-
-        ensure_session.assert_called_once_with(cfg)
-        ensure_terminal.assert_called_once_with(cfg)
-        wait_empty.assert_called_once_with(cfg)
-        wait_text.assert_called_once_with(cfg)
-        wait_submission.assert_called_once_with(cfg)
-        self.assertEqual(target, "Hermes — voicekey-hermes")
-        self.assertEqual(
-            tmux.call_args_list,
-            [
-                call(
-                    cfg,
-                    "load-buffer",
-                    "-b",
-                    "voicekey-prompt",
-                    "-",
-                    input_text=prompt + " ",
-                ),
-                call(
-                    cfg,
-                    "paste-buffer",
-                    "-p",
-                    "-d",
-                    "-b",
-                    "voicekey-prompt",
-                    "-t",
-                    "voicekey-hermes:0.0",
-                ),
-                call(
-                    cfg,
-                    "send-keys",
-                    "-t",
-                    "voicekey-hermes:0.0",
-                    "Enter",
-                ),
-            ],
-        )
-        command_arguments = " ".join(
-            str(arg)
-            for invocation in tmux.call_args_list
-            for arg in invocation.args[1:]
-        )
-        self.assertNotIn(prompt, command_arguments)
-
-    def test_voice_text_cannot_invoke_tui_commands(self):
-        self.assertEqual(
-            agent._safe_prompt("/new session"), "Voice request: /new session "
-        )
-        self.assertEqual(
-            agent._safe_prompt("!rm -rf /"), "Voice request: !rm -rf / "
-        )
-        self.assertEqual(agent._safe_prompt("run {!whoami}"), "run { !whoami} ")
-        self.assertEqual(agent._safe_prompt("hello\nworld"), "hello world ")
-
+class AgentTests(unittest.TestCase):
     @patch("voicekey.agent._run", return_value=completed())
     @patch("voicekey.agent._require", side_effect=lambda name: f"/usr/bin/{name}")
     def test_remote_tmux_uses_strict_openssh_over_tailscale_and_stdin(
@@ -209,50 +129,42 @@ class AgentDispatchTests(unittest.TestCase):
     @patch("voicekey.agent._require", return_value="/usr/bin/niri")
     @patch("voicekey.agent._run", return_value=completed())
     def test_focus_raises_the_titled_terminal_on_niri(self, run, require, window_id, compositor):
-        self.assertTrue(agent._focus_terminal(AgentConfig()))
+        self.assertEqual(agent._focus_terminal(AgentConfig()), 7)
         run.assert_called_once_with(
             ["/usr/bin/niri", "msg", "action", "focus-window", "--id", "7"], timeout=10.0)
 
     @patch("voicekey.agent.focus.compositor", return_value="sway")
     @patch("voicekey.agent._run")
     def test_focus_is_skipped_without_niri(self, run, compositor):
-        self.assertFalse(agent._focus_terminal(AgentConfig()))
+        self.assertIsNone(agent._focus_terminal(AgentConfig()))
         run.assert_not_called()
 
-    @patch("voicekey.agent._focus_terminal", side_effect=[False, True])
+    @patch("voicekey.agent._ensure_session")
+    @patch("voicekey.agent._focus_terminal", return_value=None)
+    def test_raise_terminal_never_sets_anything_up(self, focus_terminal, session):
+        self.assertIsNone(agent.raise_terminal(AgentConfig(), deadline=time.monotonic() + 1))
+        session.assert_not_called()
+
+    @patch("voicekey.agent._focus_terminal", side_effect=[None, 7])
     @patch("voicekey.agent._ensure_terminal")
     @patch("voicekey.agent._ensure_session")
     def test_show_without_a_window_starts_session_and_terminal_then_raises_it(
         self, session, terminal, focus_terminal
     ):
         cfg = AgentConfig()
-        agent.show(cfg)
+        agent.show(cfg, deadline=time.monotonic() + 10)
         session.assert_called_once_with(cfg)
         terminal.assert_called_once_with(cfg)
         self.assertEqual(focus_terminal.call_count, 2)
 
-    @patch("voicekey.agent._focus_terminal", return_value=True)
+    @patch("voicekey.agent._focus_terminal", return_value=7)
     @patch("voicekey.agent._ensure_terminal")
     @patch("voicekey.agent._ensure_session")
     def test_show_raises_an_open_window_without_session_checks(self, session, terminal, focus_terminal):
-        agent.show(AgentConfig(transport="ssh-over-tailscale"))
+        agent.show(AgentConfig(transport="ssh-over-tailscale"), deadline=time.monotonic() + 10)
         focus_terminal.assert_called_once()
         session.assert_not_called()
         terminal.assert_not_called()
-
-    @patch("voicekey.agent._focus_terminal", return_value=False)
-    @patch("voicekey.agent._ensure_terminal")
-    @patch("voicekey.agent._ensure_session")
-    def test_show_focus_only_never_sets_up(self, session, terminal, focus_terminal):
-        agent.show(AgentConfig(), focus_only=True)
-        session.assert_not_called()
-        terminal.assert_not_called()
-
-    @patch("voicekey.agent._ensure_session")
-    def test_show_refuses_the_command_target(self, session):
-        with self.assertRaisesRegex(agent.AgentError, "no window"):
-            agent.show(AgentConfig(target="command", command=["/bin/cat"]))
-        session.assert_not_called()
 
     @patch("voicekey.agent._session_has_client", return_value=True)
     @patch("voicekey.agent.focus.compositor", return_value="sway")

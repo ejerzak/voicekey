@@ -387,6 +387,115 @@ class RefusedTarget(Target):
         return Landing(reason=self.reason)
 
 
+class PendingTarget:
+    """A destination whose window is still opening. The capture records and
+    previews in a notification meanwhile; once attached, previews move to the
+    bound target, and landing waits for it within the delivery deadline."""
+
+    def __init__(self, action: str, description: str):
+        self.preview = NotifyPreview(action)
+        self.description = description
+        self.bound = None
+        self.permit: str | None = None
+        self.cancelled = threading.Event()
+        self._ready = threading.Event()
+        self._text = ""
+        self._lock = threading.Lock()
+
+    def attach(self, target):
+        """Bind the opened destination, or a RefusedTarget saying why not."""
+        with self._lock:
+            if self.cancelled.is_set():
+                target.cancel()
+                return
+            self.preview.clear()
+            self.bound, text = target, self._text
+        if text:
+            target.show(text)
+        self._ready.set()
+
+    def __getattr__(self, name):
+        # Destination facts (window, application, capabilities) are the bound
+        # target's; before then this placeholder has none.
+        if name.startswith("_"):
+            raise AttributeError(name)
+        bound = self.__dict__.get("bound")
+        if bound is None:
+            raise AttributeError(name)
+        return getattr(bound, name)
+
+    @property
+    def kind(self):
+        return self.bound.kind if self.bound is not None else "pending"
+
+    @property
+    def window_id(self):
+        return self.bound.window_id if self.bound is not None else None
+
+    @property
+    def app_id(self):
+        return self.bound.app_id if self.bound is not None else None
+
+    @property
+    def prefix(self):
+        return self.bound.prefix if self.bound is not None else ""
+
+    @prefix.setter
+    def prefix(self, value):
+        if self.bound is not None:
+            self.bound.prefix = value
+
+    @property
+    def clipboard_fallback(self):
+        if self.bound is None:
+            return not self.cancelled.is_set()
+        return getattr(self.bound, "clipboard_fallback", True)
+
+    def before(self, wait=0.0):
+        return self.bound.before(wait) if self.bound is not None else None
+
+    def show(self, text):
+        with self._lock:
+            self._text, bound = text, self.bound
+            if bound is None and not self.cancelled.is_set():
+                self.preview.show(text)
+        if bound is not None:
+            bound.show(text)
+
+    def clear(self):
+        with self._lock:
+            bound = self.bound
+            self.preview.clear()
+            if bound is None:
+                # The utterance ended unbound: a window opening later must
+                # not be claimed for it.
+                self.cancelled.set()
+                self._ready.set()
+        if bound is not None:
+            bound.clear()
+
+    def cancel(self):
+        with self._lock:
+            self.cancelled.set()
+            bound = self.bound
+            self.preview.clear()
+        if bound is not None:
+            bound.cancel()
+        self._ready.set()
+
+    def describe(self) -> str:
+        return self.bound.describe() if self.bound is not None else self.description
+
+    def land(self, text: str, deadline: float, **kwargs) -> Landing:
+        self._ready.wait(max(0, deadline - time.monotonic()))
+        if self.cancelled.is_set():
+            return Landing(reason="delivery cancelled")
+        if self.bound is None:
+            return Landing(reason=f"{self.description} did not open before the delivery deadline")
+        self.bound.permit = self.permit
+        return self.bound.land(text, deadline, **kwargs)
+
+
 def terminal_target(destination, window):
     """A focused Neovim gets buffer delivery; None keeps ordinary terminal typing."""
     from . import nvim

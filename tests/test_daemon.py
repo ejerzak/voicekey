@@ -10,6 +10,7 @@ from evdev import ecodes
 from voicekey.config import Config
 from voicekey.daemon import Daemon
 from voicekey.gate import Gate
+from voicekey.pipeline import Pipeline
 from voicekey.recovery import Journal
 from tests.test_pipeline import FakeRecorder, FakeTarget, wait_for
 from tests.test_notify import queued_notifications
@@ -29,13 +30,15 @@ class ControllerTests(unittest.TestCase):
         self.daemon.gate = Gate(self.tmp.name + '/lock')
         self.daemon.gate.open()
         self.daemon.backend = Mock(transcribe=Mock(return_value='hello'))
-        # Never reach the real agent, including from shutdown finishing a capture.
-        self.daemon.pipeline._send_agent = Mock()
+        # Never reach the real agent: the agent window is the fake target's.
         patch('voicekey.pipeline.agent.show').start()
+        patch('voicekey.daemon.focus.compositor', return_value='niri').start()
+        self.daemon.pipeline.focus_agent = Mock(return_value=7)
+        self.daemon.pipeline.open_agent = Mock()
         self.daemon.start_workers()
         self.addCleanup(self.daemon.close)
         self.targets = []
-        def target(*args):
+        def target(*args, **kwargs):
             obj = FakeTarget()
             self.targets.append(obj)
             return obj
@@ -63,10 +66,10 @@ class ControllerTests(unittest.TestCase):
             self.assertEqual(self.targets[0].calls[0][0], 'hello')
             self.assertTrue(pending.empty())
 
-    def test_status_during_agent_recording_describes_notification_preview(self):
+    def test_status_during_agent_recording_describes_the_agent_window(self):
         self.daemon.actions[frozenset({ecodes.KEY_F10})] = ('agent', 'hold')
         self.key(1, ecodes.KEY_F10)
-        self.assertEqual(self.daemon.status()['destination'], 'agent notification')
+        self.assertEqual(self.daemon.status()['destination'], 'fake target')
         self.daemon.session.cancel()
 
     def test_hold_key_transfers_gate_ownership_through_finalization(self):
@@ -158,37 +161,131 @@ class ControllerTests(unittest.TestCase):
         self.assertIsNone(self.daemon.session)
         self.assertIsNone(self.daemon._gesture)
 
-    def test_agent_tap_discards_recording_and_opens_agent(self):
+    def test_agent_tap_raises_agent_and_discards_recording(self):
         self.agent_press(held=False)
-        self.daemon.pipeline.open_agent.assert_called_once_with()
+        self.daemon.pipeline.focus_agent.assert_called_once_with()
+        self.daemon.pipeline.open_agent.assert_not_called()
         self.daemon.backend.transcribe.assert_not_called()
-        self.daemon.pipeline._send_agent.assert_not_called()
+        self.assertEqual(self.targets[0].calls, [])
         self.assertFalse(self.daemon.gate.held)
 
-    def test_agent_hold_sends_recording_without_opening(self):
+    def test_agent_hold_types_unpolished_transcript_into_agent_window(self):
+        polisher = Mock()
+        self.daemon.polisher = polisher
         self.agent_press(held=True)
-        wait_for(lambda: self.daemon.pipeline._send_agent.called)
-        self.daemon.pipeline._send_agent.assert_called_once_with('hello')
+        self.daemon.pipeline.deliveries.join()
+        self.assertEqual(self.targets[0].calls[0][0], 'hello')
+        polisher.polish.assert_not_called()
         self.daemon.pipeline.open_agent.assert_not_called()
 
-    def test_open_agent_only_raises_the_terminal_while_a_dispatch_holds_the_slot(self):
-        shown = []
+    def closed_agent_hold(self):
+        """Hold the agent chord with no agent window open; return the session
+        and the callback that reports the window opened."""
+        self.daemon.pipeline.focus_agent.return_value = None
+        self.key(1, ecodes.KEY_RIGHTALT)
+        self.key(1, ecodes.KEY_RIGHTMETA)
+        session = self.daemon.session
+        self.assertEqual(session.target.kind, 'pending')
+        self.assertTrue(self.daemon.gate.held)
+        ready = self.daemon.pipeline.open_agent.call_args.kwargs['on_ready']
+        return session, ready
+
+    def release_agent(self, session, *, held=True):
+        if not held:
+            self.cfg.tap_seconds = 10
+        self.daemon._gesture = (session, time.monotonic() - (1 if held else 0))
+        self.key(0, ecodes.KEY_RIGHTMETA)
+        self.key(0, ecodes.KEY_RIGHTALT)
+
+    def test_agent_hold_without_open_terminal_listens_and_lands_once_it_opens(self):
+        session, ready = self.closed_agent_hold()
+        session.target.show('live words')
+        ready(7, '')
+        self.assertEqual(self.targets[0].shown, ['live words'])
+        self.release_agent(session)
+        self.done()
+        self.assertEqual(self.targets[0].calls[0][0], 'hello')
+
+    def test_agent_release_before_the_terminal_opens_waits_for_it(self):
+        session, ready = self.closed_agent_hold()
+        self.release_agent(session)
+        wait_for(lambda: self.daemon.pipeline._slots['deliver'].busy)
+        self.assertEqual(self.targets, [])
+        ready(7, '')
+        self.done()
+        self.assertEqual(self.targets[0].calls[0][0], 'hello')
+
+    def test_agent_tap_while_opening_never_claims_the_new_window(self):
+        session, ready = self.closed_agent_hold()
+        self.release_agent(session, held=False)
+        self.done()
+        ready(7, '')
+        self.assertEqual(self.targets, [])
+        self.daemon.backend.transcribe.assert_not_called()
+
+    def test_agent_that_fails_to_open_saves_and_copies_the_transcript(self):
+        session, ready = self.closed_agent_hold()
+        ready(None, 'hermes not found')
+        self.assertEqual(session.target.kind, 'refused')
+        with patch('voicekey.pipeline.inject.copy') as copy:
+            self.release_agent(session)
+            self.done()
+        copy.assert_called_once_with('hello')
+        self.assertEqual(self.targets, [])
+
+    def test_agent_capture_refuses_when_focus_is_not_the_agent_window(self):
+        self.daemon.pipeline.focus_agent.return_value = 99
+        self.key(1, ecodes.KEY_RIGHTALT)
+        self.key(1, ecodes.KEY_RIGHTMETA)
+        session = self.daemon.session
+        self.assertEqual(session.target.kind, 'refused')
+        self.assertTrue(self.targets[0].cancelled.is_set())
+        session.cancel()
+
+    def test_agent_key_needs_niri(self):
+        with patch('voicekey.daemon.focus.compositor', return_value='sway'):
+            self.key(1, ecodes.KEY_RIGHTALT)
+            self.key(1, ecodes.KEY_RIGHTMETA)
+        self.assertIsNone(self.daemon.session)
+        self.daemon.pipeline.focus_agent.assert_not_called()
+
+    def test_agent_slot_serializes_opening_and_raising(self):
+        pipeline = self.daemon.pipeline
+        shown, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
         def show(cfg, **kwargs):
-            shown.append(kwargs['focus_only'])
-        slot = self.daemon.pipeline._slots['agent']
-        with patch('voicekey.pipeline.agent.show', side_effect=show):
-            self.daemon.pipeline.open_agent()
-            wait_for(lambda: len(shown) == 1 and not slot.busy)
-            release = threading.Event()
-            self.addCleanup(release.set)
-            dispatch = threading.Thread(target=slot.call, args=(lambda: release.wait(2), time.monotonic() + 3))
-            dispatch.start()
-            wait_for(lambda: slot.busy)
-            self.daemon.pipeline.open_agent()
-            wait_for(lambda: len(shown) == 2)
+            shown.set()
+            release.wait(2)
+        with patch('voicekey.pipeline.agent.show', side_effect=show) as opened, \
+                patch('voicekey.pipeline.agent.raise_terminal', return_value=7) as raised:
+            Pipeline.open_agent(pipeline)
+            self.assertTrue(shown.wait(1))
+            # While a terminal is still opening, presses neither raise nor reopen it.
+            self.assertIsNone(Pipeline.focus_agent(pipeline))
+            Pipeline.open_agent(pipeline)
             release.set()
-            dispatch.join(3)
-        self.assertEqual(shown, [False, True])
+            wait_for(lambda: not pipeline._slots['agent'].busy)
+            self.assertEqual(Pipeline.focus_agent(pipeline), 7)
+        self.assertEqual(opened.call_count, 1)
+        raised.assert_called_once()
+
+    def test_hold_during_an_open_in_progress_is_told_the_window_afterwards(self):
+        pipeline = self.daemon.pipeline
+        started, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        def show(cfg, **kwargs):
+            started.set()
+            release.wait(2)
+            return 7
+        reported = []
+        with patch('voicekey.pipeline.agent.show', side_effect=show) as opened:
+            Pipeline.open_agent(pipeline)  # a tap began opening
+            self.assertTrue(started.wait(1))
+            Pipeline.open_agent(pipeline, on_ready=lambda *args: reported.append(args))
+            release.set()
+            wait_for(lambda: reported)
+        self.assertEqual(reported, [(7, '')])
+        self.assertEqual(opened.call_count, 2)  # the second only raises the open window
 
     def test_disconnect_and_source_exit_preserve_recordings(self):
         self.key(1)

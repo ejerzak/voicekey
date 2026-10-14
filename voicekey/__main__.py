@@ -22,7 +22,7 @@ def main() -> int:
                         help="run a 16 kHz mono WAV through the pipeline as if spoken "
                              "(stop voicekey.service first: only one input method can be bound)")
     parser.add_argument("--agent", action="store_true",
-                        help="with --replay: send the transcript to the agent instead of typing")
+                        help="with --replay: process the transcript as an agent prompt (no polish)")
     parser.add_argument("--persistent", action="store_true", help="with --replay: segment and deliver a continuous session")
     commands = parser.add_mutually_exclusive_group()
     commands.add_argument("--last", action="store_true", help="print the latest prepared dictation, verbatim")
@@ -158,11 +158,8 @@ def check(cfg) -> int:
               f"agent={cfg.agent_toggle_key or '(none)'}")
     if cfg.persistent.key:
         print(f"persistent key: {cfg.persistent.key}; silence shutoff: {cfg.persistent.silence_seconds:g}s")
-    if cfg.agent.target == "command":
-        print(f"agent: command cwd={cfg.agent.working_directory}")
-    else:
-        print(f"agent: {cfg.agent.target} transport={cfg.agent.transport} "
-              f"tmux session={cfg.agent.tmux_session} cwd={cfg.agent.working_directory}")
+    print(f"agent: hermes transport={cfg.agent.transport} "
+          f"tmux session={cfg.agent.tmux_session} cwd={cfg.agent.working_directory}")
     if cfg.agent.transport == "ssh-over-tailscale":
         print(f"agent remote: {cfg.agent.remote_user}@{cfg.agent.remote_host}")
 
@@ -180,17 +177,15 @@ def check(cfg) -> int:
         print("WARNING: no niri, sway or Hyprland detected: the focused window cannot be "
               "verified, so dictations will be copied, not typed — set "
               "dictation.require_same_window = false", file=sys.stderr)
-    agent_required = set()
-    if cfg.agent.target == "hermes":
-        agent_required.add("systemd-run")
-        if cfg.agent.transport == "ssh-over-tailscale":
-            agent_required.update({"ssh", "tailscale"})
-            if cfg.agent.open_terminal and focus_tool:
-                agent_required.add(focus_tool)
-        else:
-            agent_required.update({"hermes", "tmux"})
-        if cfg.agent.open_terminal:
-            agent_required.add(cfg.agent.terminal)
+    agent_required = {"systemd-run"}
+    if cfg.agent.transport == "ssh-over-tailscale":
+        agent_required.update({"ssh", "tailscale"})
+    else:
+        agent_required.update({"hermes", "tmux"})
+    if cfg.agent.open_terminal:
+        agent_required.add(cfg.agent.terminal)
+    if compositor != "niri":
+        print("WARNING: the agent key needs niri to find the agent's window", file=sys.stderr)
     missing = sorted(command for command in required if shutil.which(command) is None)
     agent_missing = sorted(command for command in agent_required if shutil.which(command) is None)
     for command in sorted(required - set(missing)):

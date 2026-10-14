@@ -86,20 +86,12 @@ threads = 4
 context = 2048
 
 [agent]
-post_transcription_hook = "" # separate from dictation; runs before agent dispatch
+post_transcription_hook = "" # separate from dictation; runs on agent prompts
 # Hermes lives in its own tmux server, independent of the editor and of
-# voicekey. The agent key opens a terminal only if none is attached (a tap
-# also raises it on niri); closing
-# it detaches without killing Hermes or losing its conversation.
-target = "hermes"
-# Alternative: one local process per prompt, exact UTF-8 transcript on stdin.
-# target = "command"
-# command = ["/absolute/path/to/agent-wrapper", "--read-stdin"]
-# Set working_directory below to an existing project directory for command mode.
-# Arguments are literal (no shell or {text} substitution); output is discarded.
-# command_timeout bounds the process; ready_timeout bounds the whole dispatch.
-# Wrappers must keep children in the original process group (no daemonizing,
-# setsid, or new process groups); detached children escape timeout/cancellation.
+# voicekey. Pressing the agent key raises its terminal (niri only), opening
+# one first if none is open; holding it then dictates into that terminal,
+# unpolished, and never presses Enter. Closing the terminal detaches without
+# killing Hermes or losing its conversation.
 transport = "local"
 # For a Hermes on another machine over Tailscale:
 # transport = "ssh-over-tailscale"
@@ -112,8 +104,7 @@ working_directory = "~/.local/share/voicekey/hermes"  # over ssh, ~/ is the remo
 terminal = "ghostty"
 terminal_title = "Voicekey Hermes"
 open_terminal = true
-command_timeout = 10.0
-ready_timeout = 300.0      # wait rather than type into a busy/modal/draft TUI
+command_timeout = 10.0     # bounds each tmux, ssh or terminal step
 
 [text.word_overrides]       # optional literal phrases, case-insensitive word boundaries
 # "hyper whisper" = "hyprwhspr"

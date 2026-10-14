@@ -11,7 +11,7 @@ os.environ["ALTERNATE_EDITOR"] = "false"
 
 # Nor may any test reach the user's Hermes: give the agent module a subprocess
 # whose run() refuses, so tmux, systemd-run, Ghostty and niri never start.
-# Tests mock voicekey.agent._run or the pipeline's send_agent instead.
+# Tests mock voicekey.agent._run or the pipeline's agent methods instead.
 import subprocess
 import sys
 import types

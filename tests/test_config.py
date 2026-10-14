@@ -87,7 +87,6 @@ class ConfigTests(unittest.TestCase):
         path = os.path.join(os.path.dirname(__file__), "..", "config.example.toml")
         cfg = load(path)
         self.assertEqual(cfg.dictation.inject, "wtype")
-        self.assertEqual(cfg.agent.target, "hermes")
         self.assertEqual(cfg.agent.transport, "local")
         self.assertEqual(cfg.agent.tmux_session, "voicekey-hermes")
         self.assertTrue(os.path.isabs(cfg.agent.working_directory))
@@ -187,6 +186,14 @@ class ConfigTests(unittest.TestCase):
     def test_unsafe_legacy_agent_command_is_rejected(self):
         with self.assertRaisesRegex(ConfigError, "unknown config key agent.cmd"):
             self._load_text('[agent]\ncmd = ["hermes", "-z", "{text}"]\n')
+
+    def test_retired_agent_dispatch_keys_are_ignored_but_command_target_is_refused(self):
+        with self.assertLogs("voicekey.config", "WARNING") as logs:
+            cfg = self._load_text('[agent]\ntarget = "hermes"\nready_timeout = 300.0\n')
+        self.assertEqual(cfg.agent.transport, "local")
+        self.assertEqual(len(logs.records), 2)
+        with self.assertRaisesRegex(ConfigError, "agent.target = 'command' was removed"):
+            self._load_text('[agent]\ntarget = "command"\ncommand = ["/bin/cat"]\n')
 
     def test_old_emacs_agent_config_is_rejected(self):
         with self.assertRaisesRegex(

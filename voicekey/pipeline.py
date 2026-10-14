@@ -28,6 +28,8 @@ MAX_TEXT_BYTES = 100000
 # Room for all text stages and delivery intent in JSONL and readable form, even if JSON
 # escapes every byte. Reserved separately from audio before capture starts.
 TEXT_RESERVE = 8 * 1024 * 1024
+AGENT_FOCUS_SECONDS = 1.0
+AGENT_OPEN_SECONDS = 60.0
 
 
 @dataclass(frozen=True)
@@ -48,7 +50,7 @@ class Job:
 
 
 class Pipeline:
-    def __init__(self, cfg, *, backend, polisher, settled=lambda: None, journal=None, send_agent=None, notifier=None, completed=lambda *args: None):
+    def __init__(self, cfg, *, backend, polisher, settled=lambda: None, journal=None, notifier=None, completed=lambda *args: None):
         self.cfg = cfg
         self.notify = notifier or (lambda *args, **kwargs: notify(*args, **kwargs))
         self.backend = backend
@@ -61,8 +63,8 @@ class Pipeline:
                                                   history_days=limits.history_days)
         self._disk_reservation = int(cfg.max_seconds * 32000) + TEXT_RESERVE
         self.spacing = Spacing()
-        self.captures, self.jobs, self.polishing, self.deliveries, self.agents = (
-            queue.Queue(maxsize=limits.max_pending) for _ in range(5)
+        self.captures, self.jobs, self.polishing, self.deliveries = (
+            queue.Queue(maxsize=limits.max_pending) for _ in range(4)
         )
         self._closed = threading.Event()
         self._accepting = True
@@ -80,10 +82,7 @@ class Pipeline:
         self._items_lock = threading.Lock()
         self._slots = {name: Slot(name) for name in ("transcribe", "polish", "deliver", "agent", "corpus", "hook")}
         self._journal_slots = {name: Slot("journal-" + name) for name in
-                               ("startup", "capture", "transcribe", "polish", "deliver", "agent", "close", "session")}
-        self._send_agent = send_agent or (lambda text: agent.send_prompt(
-            cfg.agent, text, cancelled=self._closed,
-            deadline=min(self._stop_at, time.monotonic() + cfg.agent.ready_timeout)))
+                               ("startup", "capture", "transcribe", "polish", "deliver", "close", "session")}
 
     def start(self, *, recover=True):
         if self._threads:
@@ -102,8 +101,7 @@ class Pipeline:
         for name, source, handler, expected in (("finalize", self.captures, self._finalize, Stage.FINALIZING),
                                       ("transcription", self.jobs, self._transcribe, Stage.TRANSCRIBING),
                                       ("polishing", self.polishing, self._polish, Stage.POLISHING),
-                                      ("delivery", self.deliveries, self._deliver, Stage.READY),
-                                      ("agent-dispatch", self.agents, self._agent, Stage.READY)):
+                                      ("delivery", self.deliveries, self._deliver, Stage.READY)):
             thread = threading.Thread(target=self._consume, args=(source, handler, expected), name=name, daemon=True)
             thread.start()
             self._threads.append(thread)
@@ -260,8 +258,7 @@ class Pipeline:
         with self._items_lock:
             self._recorders.pop(session.id, None)
         session.finish(timeout=min(1.0, max(0, self._stop_at - time.monotonic())))
-        deadline = finished_at + (self.cfg.dictation.max_delay_seconds if session.action == "dictate"
-                                  else self.cfg.pipeline.transcription_seconds)
+        deadline = finished_at + self.cfg.dictation.max_delay_seconds
         if hasattr(session, "processing_seconds"):
             deadline = finished_at + session.processing_seconds
         if session_id:
@@ -382,7 +379,6 @@ class Pipeline:
         if self.ledger.get(job.id) is None:
             return
         style = self.cfg.polish.style
-        # Agent prompts use a notification preview, with no application binding.
         if job.action == "dictate":
             style = self.cfg.polish.app_styles.get(job.target.app_id, style)
         self._save("polish", lambda: self.journal.append(job.id, "final", raw=job.raw, final=final,
@@ -391,17 +387,13 @@ class Pipeline:
         self._keep_recording(job, final)
         job = replace(job, final=final, samples=None, drop_reason="filler-only utterance" if drop else "")
         if not self.ledger.transition(job.id, Stage.POLISHING, Stage.READY, final=final,
-                                      audio_seconds=0, gated=job.action == "dictate"):
+                                      audio_seconds=0, gated=True):
             return
         if job.session_id and not drop:
             with self._items_lock:
                 self._polish_context[job.session_id] = (job.id, "", self.spacing.mark(), getattr(job.target, "context_key", None))
         self._remember(job)
-        if job.action == "agent" and sum(not u.gated for u in self.ledger.snapshots()) > self.cfg.pipeline.max_pending:
-            self._complete(job, Outcome.SAVED, "agent backlog full", "polish")
-            self.notify("voicekey: agent busy", f"prompt saved to {self.journal.path(job.id, '.txt')}", error=True)
-            return
-        (self.agents if job.action == "agent" else self.deliveries).put_nowait(job)
+        self.deliveries.put_nowait(job)
 
     def _keep_recording(self, job, final):
         if self.cfg.recordings_dir and job.samples is not None:
@@ -514,37 +506,43 @@ class Pipeline:
                 self.notify("📋 Copied, not inserted" if copied else "voicekey: transcript saved, not inserted",
                             body, error=True)
 
-    def _agent(self, job):
-        attempt = self.ledger.reserve(job.id)
-        if attempt is None:
-            return
-        self._save("agent", lambda: self.journal.append(job.id, "agent-attempt", attempt=attempt, raw=job.raw, final=job.final))
+    def focus_agent(self):
+        """Raise an open agent terminal for an agent capture, on the key
+        listener's thread and so within a short bound. Returns its window id,
+        or None when no terminal is open or one is still being opened."""
+        deadline = time.monotonic() + AGENT_FOCUS_SECONDS
         try:
-            self._slots["agent"].call(lambda: self._send_agent(job.final),
-                                       min(self._stop_at, time.monotonic() + self.cfg.agent.ready_timeout))
+            return self._slots["agent"].call(lambda: agent.raise_terminal(self.cfg.agent, deadline=deadline), deadline)
+        except WorkBusy:
+            return None  # open_agent is still starting it
         except Exception as exc:
-            self._complete(job, Outcome.UNKNOWN, str(exc), "agent")
-            self.notify("voicekey: agent delivery uncertain", str(self.journal.path(job.id, '.txt')), error=True)
-        else:
-            self._complete(job, Outcome.SUBMITTED, lane="agent")
-            self.notify("✓ Sent to agent", channel="agent")
+            log.warning("could not raise agent: %s", exc)
+            return None
 
-    def open_agent(self):
-        """Open or raise the agent without a prompt, off the key listener's
-        thread. It shares the agent slot so it cannot race a dispatch into
-        starting a second session or terminal."""
+    def open_agent(self, on_ready=None):
+        """Start and raise the agent off the key listener's thread. It shares
+        the agent slot, so repeated presses cannot start a second session or
+        terminal. ON_READY(window, error) receives the raised window's id, or
+        None and the reason, after any open already in progress."""
         def run():
-            deadline = min(self._stop_at, time.monotonic() + self.cfg.agent.ready_timeout)
-            show = lambda focus_only=False: agent.show(self.cfg.agent, cancelled=self._closed,
-                                                       deadline=deadline, focus_only=focus_only)
+            deadline = min(self._stop_at, time.monotonic() + AGENT_OPEN_SECONDS)
+            open_ = lambda: agent.show(self.cfg.agent, cancelled=self._closed, deadline=deadline)
+            window, error = None, ""
             try:
                 try:
-                    self._slots["agent"].call(show, deadline)
+                    window = self._slots["agent"].call(open_, deadline)
                 except WorkBusy:
-                    show(focus_only=True)  # the dispatch holding the slot ensures the rest
+                    if on_ready is None:
+                        return  # already opening
+                    while self._slots["agent"].busy and time.monotonic() < deadline:
+                        time.sleep(0.05)
+                    window = self._slots["agent"].call(open_, deadline)
             except Exception as exc:
-                log.warning("could not open agent: %s", exc)
-                self.notify("voicekey: could not open agent", str(exc), error=True)
+                error = str(exc) or type(exc).__name__
+                log.warning("could not open agent: %s", error)
+                self.notify("voicekey: could not open agent", error, error=True)
+            if on_ready is not None:
+                on_ready(window, error or ("" if window is not None else "the agent window did not appear"))
         threading.Thread(target=run, name="agent-open", daemon=True).start()
 
     def close(self, timeout=None):

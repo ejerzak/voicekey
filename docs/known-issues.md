@@ -24,7 +24,7 @@ terminal/application cooperation ([Bash documentation](https://www.gnu.org/softw
 [Ghostty paste protection](https://ghostty.org/docs/config/reference#clipboard-paste-protection)).
 Emacs's ordinary pinned-buffer insertion inserts text rather than invoking Return;
 its `term` and `vterm` paths send process input and need terminal filtering.
-The separate agent key intentionally submits prompts and is outside this issue.
+The agent key types into the Hermes terminal through the same input-method path.
 
 Observed delivery records included input-method insertion for Signal and Ghostty,
 both input-method and `wtype` delivery for Firefox, and buffer insertion for Emacs.
@@ -49,7 +49,7 @@ Implemented policy:
   without overwriting a newer queued preview. Emacs's Wayland previews remain
   single-line while its ordinary buffer insertion preserves final formatting.
 - Original transcripts remain in the journal/recovery. Clipboard recovery retains
-  formatting for manual use, without automatic paste. Agent dispatch is unchanged.
+  formatting for manual use, without automatic paste.
 
 The Python backends share `delivery.prepare`; Emacs mirrors the small policy in
 its insertion transaction. Controlled tests cover control characters, formatting,
