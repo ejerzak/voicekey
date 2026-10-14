@@ -13,6 +13,7 @@ import numpy as np
 from voicekey.capture import Session
 from voicekey.config import Config
 from voicekey.pipeline import Pipeline
+from voicekey.recorder import RecordingError
 from voicekey.recovery import Journal
 from voicekey.target import Landing, Outcome, WtypeTarget, NotifyPreview, Window
 from voicekey.notify import notify
@@ -162,6 +163,25 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(final['final'], 'hello')
         self.assertEqual(self.events(session.id)[-1]['outcome'], 'confirmed')
 
+    def test_hold_released_before_the_first_audio_frame_is_dropped_quietly(self):
+        recorder = FakeRecorder(0.3)
+        recorder.samples = np.zeros(0, dtype=np.float32)
+        session = self.submit(live='', recorder=recorder)
+        self.done()
+        self.backend.transcribe.assert_not_called()
+        self.assertEqual(self.events(session.id)[-1]['outcome'], 'dropped')
+        self.assertEqual(session.target.calls, [])
+        self.notice.assert_not_called()
+
+    def test_recorder_failure_without_audio_reports_the_recorder(self):
+        recorder = FakeRecorder(0.3)
+        recorder.stop = Mock(side_effect=RecordingError('pw-record exited early', np.zeros(0, dtype=np.float32), 0.3))
+        session = self.submit(live='', recorder=recorder)
+        self.done()
+        self.backend.transcribe.assert_not_called()
+        self.assertEqual(self.events(session.id)[-1]['outcome'], 'saved')
+        self.assertIn('pw-record exited early', self.notice.call_args.args[1])
+
     def test_hook_timeout_preserves_order_and_next_dictation(self):
         self.cfg.dictation.post_transcription_hook = 'sleep .4; printf late'
         with patch('voicekey.text.HOOK_SECONDS', .05):
@@ -187,7 +207,7 @@ class PipelineTests(unittest.TestCase):
         self.pipeline.start()
         self.addCleanup(self.pipeline.close)
 
-    def submit(self, target=None, *, live='live fallback', age=0, action='dictate'):
+    def submit(self, target=None, *, live='live fallback', age=0, action='dictate', recorder=None):
         identity = self.pipeline.admit()
         self.assertIsNotNone(identity)
         session = Session(action, 'hold', frozenset(), 'fake', identity=identity)
@@ -196,7 +216,7 @@ class PipelineTests(unittest.TestCase):
         else:
             session.target = FakeTarget()
         session.text = live
-        self.pipeline.submit(session, FakeRecorder(), time.monotonic() - age)
+        self.pipeline.submit(session, recorder or FakeRecorder(), time.monotonic() - age)
         return session
 
     def done(self):

@@ -18,7 +18,7 @@ import numpy as np
 from . import agent, inject, polish, recovery, text
 from .ledger import Ledger, Stage
 from .notify import notify
-from .recorder import RecordingError
+from .recorder import SAMPLE_RATE, RecordingError
 from .spacing import Spacing
 from .target import Landing, Outcome
 from .work import Slot, WorkBusy, WorkTimeout
@@ -277,11 +277,17 @@ class Pipeline:
         backend = self.backend()
         failure = job.failure
         try:
-            if backend is None:
+            if len(job.samples) < SAMPLE_RATE // 100:
+                # A hold released before the microphone's first frame (about
+                # 0.4 s after key-down) has no audio, and Parakeet raises on it.
+                log.info("%s captured no audio", job.id)
+                raw = ""
+            elif backend is None:
                 raise RuntimeError("transcription backend unavailable")
-            deadline = min(self._deadline(job),
-                           time.monotonic() + self.cfg.pipeline.transcription_seconds)
-            raw = self._slots["transcribe"].call(lambda: backend.transcribe(job.samples), deadline)
+            else:
+                deadline = min(self._deadline(job),
+                               time.monotonic() + self.cfg.pipeline.transcription_seconds)
+                raw = self._slots["transcribe"].call(lambda: backend.transcribe(job.samples), deadline)
             if not isinstance(raw, str) or len(raw.encode()) > MAX_TEXT_BYTES:
                 raise ValueError("invalid or oversized transcript")
         except Exception as exc:
