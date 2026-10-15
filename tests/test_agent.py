@@ -4,7 +4,7 @@ import subprocess
 import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from voicekey import agent
 from voicekey.config import AgentConfig
@@ -122,16 +122,63 @@ class AgentTests(unittest.TestCase):
     def test_remote_terminal_window_is_identified_by_title(self, run, require, compositor):
         cfg = AgentConfig(terminal_title="Voicekey Hermes")
         self.assertTrue(agent._terminal_window_open(cfg))
-        self.assertEqual(agent._terminal_window_id(cfg), 7)
+        self.assertEqual(agent._terminal_window(cfg)["id"], 7)
 
     @patch("voicekey.agent.focus.compositor", return_value="niri")
-    @patch("voicekey.agent._terminal_window_id", return_value=7)
+    @patch("voicekey.agent._terminal_window", return_value={"id": 7, "workspace_id": 1})
     @patch("voicekey.agent._require", return_value="/usr/bin/niri")
     @patch("voicekey.agent._run", return_value=completed())
-    def test_focus_raises_the_titled_terminal_on_niri(self, run, require, window_id, compositor):
+    def test_focus_raises_the_titled_terminal_on_niri(self, run, require, window, compositor):
         self.assertEqual(agent._focus_terminal(AgentConfig()), 7)
         run.assert_called_once_with(
             ["/usr/bin/niri", "msg", "action", "focus-window", "--id", "7"], timeout=10.0)
+
+    _WORKSPACES = ('[{"id":1,"idx":1,"name":"emacs","output":"eDP-1","is_focused":false},'
+                   '{"id":3,"idx":3,"name":null,"output":"eDP-1","is_focused":true},'
+                   '{"id":5,"idx":1,"name":"hermes","output":"HDMI-1","is_focused":false}]')
+
+    def _action(self, *argv):
+        return call(["/usr/bin/niri", "msg", "action", *argv], timeout=10.0)
+
+    def _raise_parked(self, run, workspace_id):
+        """Raise a terminal on WORKSPACE_ID with parking on; return the actions."""
+        run.side_effect = [completed(stdout=self._WORKSPACES), completed(), completed()]
+        with patch("voicekey.agent._terminal_window",
+                   return_value={"id": 7, "workspace_id": workspace_id}):
+            self.assertEqual(agent._focus_terminal(AgentConfig(park_workspace="hermes")), 7)
+        return run.call_args_list[1:]
+
+    @patch("voicekey.agent.focus.compositor", return_value="niri")
+    @patch("voicekey.agent._require", return_value="/usr/bin/niri")
+    @patch("voicekey.agent._run")
+    def test_parked_terminal_comes_to_the_focused_workspace(self, run, require, compositor):
+        self.assertEqual(self._raise_parked(run, 1), [
+            self._action("move-window-to-workspace", "--window-id", "7", "--focus", "false", "3"),
+            self._action("focus-window", "--id", "7"),
+        ])
+
+    @patch("voicekey.agent.focus.compositor", return_value="niri")
+    @patch("voicekey.agent._require", return_value="/usr/bin/niri")
+    @patch("voicekey.agent._run")
+    def test_terminal_on_another_monitor_moves_to_the_focused_one(self, run, require, compositor):
+        self.assertEqual(self._raise_parked(run, 5), [
+            self._action("move-window-to-monitor", "--id", "7", "eDP-1"),
+            self._action("focus-window", "--id", "7"),
+        ])
+
+    @patch("voicekey.agent.focus.compositor", return_value="niri")
+    @patch("voicekey.agent._require", return_value="/usr/bin/niri")
+    @patch("voicekey.agent._run")
+    def test_terminal_already_on_the_focused_workspace_is_only_focused(self, run, require, compositor):
+        self.assertEqual(self._raise_parked(run, 3), [self._action("focus-window", "--id", "7")])
+
+    @patch("voicekey.agent._require", return_value="/usr/bin/niri")
+    @patch("voicekey.agent._run", return_value=completed())
+    def test_park_sends_the_terminal_back_without_moving_focus(self, run, require):
+        agent.park_terminal(AgentConfig(park_workspace="hermes"), 7, deadline=time.monotonic() + 1)
+        run.assert_called_once_with(
+            ["/usr/bin/niri", "msg", "action", "move-window-to-workspace", "--window-id", "7",
+             "--focus", "false", "hermes"], timeout=10.0)
 
     @patch("voicekey.agent.focus.compositor", return_value="sway")
     @patch("voicekey.agent._run")

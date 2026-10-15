@@ -414,6 +414,24 @@ its title (`terminal_title`). The capture binds to that window as ordinary
 dictation does; if focus has moved elsewhere by then, nothing is typed and
 the transcript is saved and copied.
 
+With `park_workspace`, the terminal comes to you, Guake-style, instead of the
+view going to it. It lives on that named workspace between uses; a press
+brings it to the focused workspace and focuses it, and a tap while it
+already had focus sends it back. A hold always dictates. Declare the
+workspace in niri's config and give the terminal a window rule that opens it
+floating there; voicekey brings a newly opened one over itself:
+
+```kdl
+workspace "hermes"
+
+window-rule {
+    match app-id="com.mitchellh.ghostty" title="^Voicekey Hermes$"
+    open-on-workspace "hermes"
+    open-focused false
+    open-floating true
+}
+```
+
 ## Diagnostics
 
 ```sh

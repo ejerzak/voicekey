@@ -416,31 +416,39 @@ def _terminal_window_open(cfg: AgentConfig) -> bool:
     client count is the best available answer."""
     if focus.compositor() != "niri":
         return _session_has_client(cfg)
-    return _terminal_window_id(cfg) is not None
+    return _terminal_window(cfg) is not None
 
 
-def _terminal_window_id(cfg: AgentConfig) -> int | None:
-    """The niri id of the local terminal showing the session, by title."""
+def _niri_list(cfg: AgentConfig, what: str) -> list[dict]:
+    """niri's JSON listing of WHAT (windows, workspaces)."""
     result = _run(
-        [_require("niri"), "msg", "--json", "windows"],
+        [_require("niri"), "msg", "--json", what],
         timeout=cfg.command_timeout,
         check=False,
     )
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()[-500:]
-        raise AgentError(f"could not query niri windows: {detail or 'no output'}")
+        raise AgentError(f"could not query niri {what}: {detail or 'no output'}")
     try:
-        windows = json.loads(result.stdout)
+        items = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
-        raise AgentError(f"niri returned invalid window data: {exc}")
-    if not isinstance(windows, list):
-        raise AgentError("niri returned invalid window data: expected a list")
+        raise AgentError(f"niri returned invalid {what} data: {exc}")
+    if not isinstance(items, list):
+        raise AgentError(f"niri returned invalid {what} data: expected a list")
+    return [item for item in items if isinstance(item, dict)]
+
+
+def _niri_action(cfg: AgentConfig, *argv: str) -> None:
+    _run([_require("niri"), "msg", "action", *argv], timeout=cfg.command_timeout)
+
+
+def _terminal_window(cfg: AgentConfig) -> dict | None:
+    """niri's record of the local terminal showing the session, by title."""
     return next(
         (
-            window.get("id")
-            for window in windows
-            if isinstance(window, dict)
-            and window.get("app_id") == "com.mitchellh.ghostty"
+            window
+            for window in _niri_list(cfg, "windows")
+            if window.get("app_id") == "com.mitchellh.ghostty"
             and window.get("title") == cfg.terminal_title
             and isinstance(window.get("id"), int)
         ),
@@ -450,17 +458,36 @@ def _terminal_window_id(cfg: AgentConfig) -> int | None:
 
 def _focus_terminal(cfg: AgentConfig) -> int | None:
     """Raise the session's terminal and return its niri window id, or None
-    when it is not open; only niri exposes windows to do so."""
+    when it is not open; only niri exposes windows to do so. With a parking
+    workspace the terminal is brought to the focused workspace rather than
+    the view taken to it."""
     if focus.compositor() != "niri":
         return None
-    window = _terminal_window_id(cfg)
+    window = _terminal_window(cfg)
     if window is None:
         return None
-    _run(
-        [_require("niri"), "msg", "action", "focus-window", "--id", str(window)],
-        timeout=cfg.command_timeout,
-    )
-    return window
+    if cfg.park_workspace:
+        _bring_to_focused_workspace(cfg, window)
+    _niri_action(cfg, "focus-window", "--id", str(window["id"]))
+    return window["id"]
+
+
+def _bring_to_focused_workspace(cfg: AgentConfig, window: dict) -> None:
+    """Move WINDOW onto the focused workspace. niri msg names a workspace by
+    name or index, and an index is unambiguous only within one monitor, so
+    a window on another monitor moves to that monitor instead, landing on
+    its active workspace: the focused one."""
+    workspaces = _niri_list(cfg, "workspaces")
+    current = next((ws for ws in workspaces if ws.get("is_focused")), None)
+    if current is None or current.get("id") == window.get("workspace_id"):
+        return
+    home = next((ws for ws in workspaces if ws.get("id") == window.get("workspace_id")), None)
+    window_id = str(window["id"])
+    if home is not None and home.get("output") == current.get("output"):
+        _niri_action(cfg, "move-window-to-workspace", "--window-id", window_id,
+                     "--focus", "false", str(current["idx"]))
+    else:
+        _niri_action(cfg, "move-window-to-monitor", "--id", window_id, str(current["output"]))
 
 
 def _client_count(cfg: AgentConfig) -> int:
@@ -488,6 +515,17 @@ def raise_terminal(cfg: AgentConfig, *, deadline: float) -> int | None:
     token = _operation.set((deadline, None))
     try:
         return _focus_terminal(cfg)
+    finally:
+        _operation.reset(token)
+
+
+def park_terminal(cfg: AgentConfig, window: int, *, deadline: float) -> None:
+    """Send the terminal WINDOW back to agent.park_workspace; focus stays on
+    the workspace it leaves."""
+    token = _operation.set((deadline, None))
+    try:
+        _niri_action(cfg, "move-window-to-workspace", "--window-id", str(window),
+                     "--focus", "false", cfg.park_workspace)
     finally:
         _operation.reset(token)
 

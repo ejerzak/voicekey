@@ -92,6 +92,7 @@ class Daemon:
         self._pause_reason = ""
         self._typing_fallback = False
         self._gesture = None  # (tap/hold session, key-down time), until its chord is released
+        self._park_on_tap = None  # the gesture's agent window, when it already had focus at key-down
         self.vad = None
         self._vad_slot = Slot("speech-detector")
         self.pressed = {}
@@ -387,6 +388,7 @@ class Daemon:
             return
         # Capture starts at key-down for taps too; the release decides what it was.
         started = time.monotonic()
+        parkable = None
         if action == "persistent":
             instruction = ("release to stop; tap to keep listening" if behavior == TAP_HOLD
                            else "press a dictation key to stop")
@@ -398,7 +400,10 @@ class Daemon:
                 if focus.compositor() != "niri":
                     notify("voicekey: agent unavailable", "the agent key needs niri to find the agent's window", error=True)
                     return
+                before = focus.window_id() if self.cfg.agent.park_workspace else None
                 agent_window = self.pipeline.focus_agent() or AGENT_OPENING
+                if before is not None and before == agent_window:
+                    parkable = agent_window
             self._start(device, chord, behavior, action,
                         "release to insert; tap only raises the agent" if behavior == TAP_HOLD else
                         "press again to stop" if behavior == TOGGLE else "release to stop",
@@ -406,15 +411,21 @@ class Daemon:
             owner = self.session
         if behavior == TAP_HOLD and owner is not None:
             self._gesture = (owner, started)
+            self._park_on_tap = parkable
 
     def _released(self, owner, *, tap):
         """Resolve a tap/hold key. A tap keeps dictation listening, or discards
-        the agent recording, leaving the agent raised; a hold stops either."""
+        the agent recording, leaving the agent raised; a hold stops either.
+        With agent.park_workspace, a tap on an agent that already had focus
+        parks it instead."""
+        park, self._park_on_tap = self._park_on_tap, None
         if owner is self.persistent:
             if not owner.stopping.is_set():
                 owner.starting_key_released(not tap)
         elif owner is self.session:
             self._finish(discard=tap)
+            if tap and park is not None:
+                self.pipeline.park_agent(park)
 
     def _bind_agent(self, window):
         """Bind a capture to the agent window just raised; its input field

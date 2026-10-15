@@ -525,6 +525,15 @@ class Pipeline:
             log.warning("could not raise agent: %s", exc)
             return None
 
+    def park_agent(self, window):
+        """Send the agent terminal WINDOW back to its parking workspace, on
+        the key listener's thread and so within a short bound."""
+        deadline = time.monotonic() + AGENT_FOCUS_SECONDS
+        try:
+            self._slots["agent"].call(lambda: agent.park_terminal(self.cfg.agent, window, deadline=deadline), deadline)
+        except Exception as exc:  # WorkBusy included: an open in progress keeps it
+            log.warning("could not park agent: %s", exc)
+
     def open_agent(self, on_ready=None):
         """Start and raise the agent off the key listener's thread. It shares
         the agent slot, so repeated presses cannot start a second session or

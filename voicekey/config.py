@@ -152,6 +152,7 @@ class AgentConfig:
     terminal: str = "ghostty"
     terminal_title: str = "Voicekey Hermes"
     open_terminal: bool = True
+    park_workspace: str = ""
     command_timeout: float = 10.0
     post_transcription_hook: str = ""
 
@@ -447,6 +448,13 @@ def _validate(cfg: Config) -> None:
     cfg.agent.open_terminal = _boolean(
         "agent.open_terminal", cfg.agent.open_terminal
     )
+    cfg.agent.park_workspace = _string(
+        "agent.park_workspace", cfg.agent.park_workspace, allow_empty=True
+    )
+    if cfg.agent.park_workspace.isdigit():  # niri msg would read it as an index
+        raise ConfigError(
+            "agent.park_workspace must be a niri workspace name, not an index"
+        )
     cfg.agent.command_timeout = _number(
         "agent.command_timeout", cfg.agent.command_timeout, minimum=0.1
     )

@@ -169,6 +169,33 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(self.targets[0].calls, [])
         self.assertFalse(self.daemon.gate.held)
 
+    def parking_press(self, *, held, focused):
+        """Press the agent key with parking on, the agent window (7) having
+        focus beforehand or not; return the park_agent mock."""
+        self.cfg.agent.park_workspace = 'hermes'
+        self.daemon.pipeline.park_agent = Mock()
+        with patch('voicekey.daemon.focus.window_id', return_value=7 if focused else 3):
+            self.agent_press(held=held)
+        return self.daemon.pipeline.park_agent
+
+    def test_agent_tap_parks_an_agent_that_already_had_focus(self):
+        self.parking_press(held=False, focused=True).assert_called_once_with(7)
+        self.daemon.backend.transcribe.assert_not_called()
+
+    def test_agent_tap_only_raises_an_agent_that_lacked_focus(self):
+        self.parking_press(held=False, focused=False).assert_not_called()
+        self.daemon.pipeline.focus_agent.assert_called_once_with()
+
+    def test_agent_hold_dictates_into_a_focused_agent_instead_of_parking(self):
+        self.parking_press(held=True, focused=True).assert_not_called()
+        self.daemon.pipeline.deliveries.join()
+        self.assertEqual(self.targets[0].calls[0][0], 'hello')
+
+    def test_without_parking_the_agent_key_never_asks_for_focus(self):
+        with patch('voicekey.daemon.focus.window_id') as window_id:
+            self.agent_press(held=False)
+        window_id.assert_not_called()
+
     def test_agent_hold_types_unpolished_transcript_into_agent_window(self):
         polisher = Mock()
         self.daemon.polisher = polisher

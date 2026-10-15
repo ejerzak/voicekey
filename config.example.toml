@@ -104,6 +104,11 @@ working_directory = "~/.local/share/voicekey/hermes"  # over ssh, ~/ is the remo
 terminal = "ghostty"
 terminal_title = "Voicekey Hermes"
 open_terminal = true
+# A named niri workspace (declared in niri's config) holding the terminal
+# between uses: a press brings it to the focused workspace, a tap while it had
+# focus sends it back. Pair it with a niri window rule matching terminal_title
+# that opens it floating there. Empty: a press takes the view to the terminal.
+park_workspace = ""
 command_timeout = 10.0     # bounds each tmux, ssh or terminal step
 
 [text.word_overrides]       # optional literal phrases, case-insensitive word boundaries

@@ -205,6 +205,13 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "agent.tmux_session"):
             self._load_text('[agent]\ntmux_session = "bad/session"\n')
 
+    def test_park_workspace_is_a_name(self):
+        self.assertEqual(self._load_text("").agent.park_workspace, "")
+        cfg = self._load_text('[agent]\npark_workspace = "hermes"\n')
+        self.assertEqual(cfg.agent.park_workspace, "hermes")
+        with self.assertRaisesRegex(ConfigError, "not an index"):
+            self._load_text('[agent]\npark_workspace = "4"\n')
+
     def test_recording_bounds_are_ordered(self):
         with self.assertRaisesRegex(ConfigError, "tap_seconds must be less"):
             self._load_text("tap_seconds = 2\nmax_seconds = 1\n")
