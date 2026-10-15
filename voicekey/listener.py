@@ -52,10 +52,24 @@ def all_event_devices() -> set[str]:
     return set(glob.glob("/dev/input/event*"))
 
 
+def _monotonic(ev) -> float:
+    """When EV happened, on the monotonic clock. The kernel stamps events with
+    wall-clock time, and a key handler that blocks (raising and binding the
+    agent) delays reading the next event, so the read time would overstate
+    how long a key was held."""
+    try:
+        lag = time.time() - float(ev.timestamp())
+    except (AttributeError, TypeError, ValueError):
+        lag = 0.0
+    return time.monotonic() - max(0.0, lag)
+
+
 class KeyboardListener:
     """Callbacks:
-      on_key(device_path, keycode, value)  — value 1=press, 0=release (repeats
-                                             are filtered out here)
+      on_key(device_path, keycode, value, at=...)
+                                           — value 1=press, 0=release (repeats
+                                             are filtered out here); AT is when
+                                             the key moved, on the monotonic clock
       on_device_lost(device_path)          — device vanished (may hold a key)
       on_tick()                            — every loop iteration (~1s max)
       on_no_access(message)                — no readable key devices (once per outage)
@@ -160,7 +174,7 @@ class KeyboardListener:
                 continue
             if ev.code in self.keycodes:
                 if ev.value in (0, 1):  # ignore repeats (2)
-                    self.on_key(device_path, ev.code, ev.value)
+                    self.on_key(device_path, ev.code, ev.value, at=_monotonic(ev))
             elif ev.value == 1 and ev.code not in MODIFIERS and self.on_activity is not None:
                 self.on_activity()
 

@@ -2,7 +2,8 @@
 
 The ledger owns admission and terminal state. FIFO stage queues carry each
 utterance once, including utterances which skip polish, so final delivery stays
-in speech order. Supervised execution slots give callers control of deadlines
+in speech order; only an utterance whose window is still opening waits aside,
+not holding up the ones behind it. Supervised execution slots give callers control of deadlines
 without spawning replacement threads for a hung model or application.
 """
 from __future__ import annotations
@@ -63,8 +64,8 @@ class Pipeline:
                                                   history_days=limits.history_days)
         self._disk_reservation = int(cfg.max_seconds * 32000) + TEXT_RESERVE
         self.spacing = Spacing()
-        self.captures, self.jobs, self.polishing, self.deliveries = (
-            queue.Queue(maxsize=limits.max_pending) for _ in range(4)
+        self.captures, self.jobs, self.polishing, self.opening, self.deliveries = (
+            queue.Queue(maxsize=limits.max_pending) for _ in range(5)
         )
         self._closed = threading.Event()
         self._accepting = True
@@ -101,6 +102,7 @@ class Pipeline:
         for name, source, handler, expected in (("finalize", self.captures, self._finalize, Stage.FINALIZING),
                                       ("transcription", self.jobs, self._transcribe, Stage.TRANSCRIBING),
                                       ("polishing", self.polishing, self._polish, Stage.POLISHING),
+                                      ("opening", self.opening, self._await_window, Stage.READY),
                                       ("delivery", self.deliveries, self._deliver, Stage.READY)):
             thread = threading.Thread(target=self._consume, args=(source, handler, expected), name=name, daemon=True)
             thread.start()
@@ -399,6 +401,16 @@ class Pipeline:
             with self._items_lock:
                 self._polish_context[job.session_id] = (job.id, "", self.spacing.mark(), getattr(job.target, "context_key", None))
         self._remember(job)
+        if job.target.kind == "pending" and not job.drop_reason:
+            self.opening.put_nowait(job)
+        else:
+            self.deliveries.put_nowait(job)
+
+    def _await_window(self, job):
+        """Hold a job whose window is still opening until it opens, fails or
+        the job expires, outside the delivery worker: the opening allowance
+        is far longer than a dictation's, which would expire queued behind."""
+        job.target.wait_ready(max(0.0, self._deadline(job) - time.monotonic()))
         self.deliveries.put_nowait(job)
 
     def _keep_recording(self, job, final):

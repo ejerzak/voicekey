@@ -42,6 +42,7 @@ class ControllerTests(unittest.TestCase):
             obj = FakeTarget()
             self.targets.append(obj)
             return obj
+        self.fake_bind = target
         patch('voicekey.daemon.target_mod.bind', side_effect=target).start()
         patch('voicekey.daemon.notify').start()
         patch('voicekey.pipeline.notify').start()
@@ -236,11 +237,45 @@ class ControllerTests(unittest.TestCase):
     def test_agent_release_before_the_terminal_opens_waits_for_it(self):
         session, ready = self.closed_agent_hold()
         self.release_agent(session)
-        wait_for(lambda: self.daemon.pipeline._slots['deliver'].busy)
+        wait_for(lambda: self.daemon.pipeline.opening.unfinished_tasks == 1)
+        self.assertFalse(self.daemon.pipeline._slots['deliver'].busy, "waiting aside, not in delivery")
         self.assertEqual(self.targets, [])
         ready(7, '')
         self.done()
         self.assertEqual(self.targets[0].calls[0][0], 'hello')
+
+    def test_dictation_is_not_held_behind_an_agent_window_still_opening(self):
+        session, ready = self.closed_agent_hold()
+        self.release_agent(session)
+        wait_for(lambda: self.daemon.backend.transcribe.call_count == 1)
+        self.key(1)  # dictate, while the agent window is still opening
+        self.key(0)
+        wait_for(lambda: self.targets and self.targets[0].calls)
+        self.assertEqual(self.targets[0].calls[0][0], 'hello')
+        ready(7, '')
+        self.done()
+        self.assertEqual(self.targets[1].calls[0][0], 'hello')
+
+    def test_agent_tap_is_timed_by_the_keyboard_not_by_binding(self):
+        """Raising and binding block the listener, so the release is read
+        late; its own time still makes it a tap, which parks the agent."""
+        self.cfg.agent.park_workspace = 'hermes'
+        self.daemon.pipeline.park_agent = Mock()
+        fake_bind = self.fake_bind
+        def slow_bind(*args, **kwargs):
+            time.sleep(0.3)
+            return fake_bind(*args, **kwargs)
+        pressed = time.monotonic()
+        with patch('voicekey.daemon.focus.window_id', return_value=7), \
+                patch('voicekey.daemon.target_mod.bind', side_effect=slow_bind):
+            self.daemon._on_key('fake', ecodes.KEY_RIGHTALT, 1, at=pressed)
+            self.daemon._on_key('fake', ecodes.KEY_RIGHTMETA, 1, at=pressed)
+        self.assertGreater(time.monotonic() - pressed, self.cfg.tap_seconds)
+        self.daemon._on_key('fake', ecodes.KEY_RIGHTMETA, 0, at=pressed + 0.05)
+        self.daemon._on_key('fake', ecodes.KEY_RIGHTALT, 0, at=pressed + 0.06)
+        self.done()
+        self.daemon.pipeline.park_agent.assert_called_once_with(7)
+        self.daemon.backend.transcribe.assert_not_called()
 
     def test_agent_tap_while_opening_never_claims_the_new_window(self):
         session, ready = self.closed_agent_hold()
@@ -403,3 +438,17 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(self.targets[0].calls[0][0], 'hello')
         self.assertEqual(len(self.daemon.backend.transcribe.call_args.args[0]), 8000)
         copy.assert_not_called()
+
+    def test_agent_replay_goes_to_the_agent_window(self):
+        import wave
+        path = str(Path(self.tmp.name) / 'sample.wav')
+        with wave.open(path, 'wb') as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(16000)
+            wav.writeframes(b'\0\0' * 8000)
+        with patch('voicekey.daemon.target_mod.bind', side_effect=self.fake_bind) as bind:
+            self.daemon.replay(path, 'agent')
+        self.daemon.pipeline.focus_agent.assert_called_once_with()
+        self.assertIn('activation_wait', bind.call_args.kwargs, "bound as the agent window")
+        self.assertEqual(self.targets[0].calls[0][0], 'hello')

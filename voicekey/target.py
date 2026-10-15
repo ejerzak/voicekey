@@ -390,7 +390,8 @@ class RefusedTarget(Target):
 class PendingTarget:
     """A destination whose window is still opening. The capture records and
     previews in a notification meanwhile; once attached, previews move to the
-    bound target, and landing waits for it within the delivery deadline."""
+    bound target. The pipeline waits for it (wait_ready) before delivery;
+    landing still waits within the delivery deadline, should it be early."""
 
     def __init__(self, action: str, description: str):
         self.preview = NotifyPreview(action)
@@ -485,6 +486,11 @@ class PendingTarget:
 
     def describe(self) -> str:
         return self.bound.describe() if self.bound is not None else self.description
+
+    def wait_ready(self, timeout: float) -> None:
+        """Wait until the window is attached, refused or no longer wanted.
+        The pipeline does this before delivery, which must not wait."""
+        self._ready.wait(timeout)
 
     def land(self, text: str, deadline: float, **kwargs) -> Landing:
         self._ready.wait(max(0, deadline - time.monotonic()))

@@ -317,16 +317,24 @@ class Daemon:
         if action == "persistent":
             self._start_persistent("replay", frozenset(), self.recorder)
         else:
-            self._start("replay", frozenset(), HOLD, action, "replaying")
+            # An agent replay goes to the agent window, like the agent key.
+            agent_window = None
+            if action == "agent" and (agent_window := self._raise_agent()) is None:
+                return
+            self._start("replay", frozenset(), HOLD, action, "replaying", agent_window=agent_window)
         while self.session is not None or self.persistent is not None:
             self._on_tick()
             time.sleep(0.02)
         while self.pipeline.ledger.busy:
             time.sleep(0.02)
 
-    def _on_key(self, device, code, value):
+    def _on_key(self, device, code, value, at=None):
+        """AT is when the key moved: a press handler that blocks (raising and
+        binding the agent) delays reading the release, which must not turn
+        a tap into a hold."""
         if self._stopping:
             return
+        at = time.monotonic() if at is None else at
         pressed = self.pressed.setdefault(device, set())
         session = self.session
         if value == 0:
@@ -334,7 +342,7 @@ class Daemon:
                 owner, started = self._gesture
                 if device == owner.device and code in owner.chord:
                     self._gesture = None
-                    self._released(owner, tap=time.monotonic() - started < self.cfg.tap_seconds)
+                    self._released(owner, tap=at - started < self.cfg.tap_seconds)
             if (session is not None and session.behavior == HOLD
                     and session.device == device and code in session.chord):
                 self._finish()
@@ -387,7 +395,7 @@ class Daemon:
                 self._finish()
             return
         # Capture starts at key-down for taps too; the release decides what it was.
-        started = time.monotonic()
+        started = at
         parkable = None
         if action == "persistent":
             instruction = ("release to stop; tap to keep listening" if behavior == TAP_HOLD
@@ -397,11 +405,10 @@ class Daemon:
         else:
             agent_window = None
             if action == "agent":
-                if focus.compositor() != "niri":
-                    notify("voicekey: agent unavailable", "the agent key needs niri to find the agent's window", error=True)
+                before = (focus.window_id() if self.cfg.agent.park_workspace
+                          and focus.compositor() == "niri" else None)
+                if (agent_window := self._raise_agent()) is None:
                     return
-                before = focus.window_id() if self.cfg.agent.park_workspace else None
-                agent_window = self.pipeline.focus_agent() or AGENT_OPENING
                 if before is not None and before == agent_window:
                     parkable = agent_window
             self._start(device, chord, behavior, action,
@@ -426,6 +433,14 @@ class Daemon:
             self._finish(discard=tap)
             if tap and park is not None:
                 self.pipeline.park_agent(park)
+
+    def _raise_agent(self):
+        """Raise the agent for a capture: its window id, AGENT_OPENING while
+        one opens, or None (after saying why) without niri."""
+        if focus.compositor() != "niri":
+            notify("voicekey: agent unavailable", "the agent key needs niri to find the agent's window", error=True)
+            return None
+        return self.pipeline.focus_agent() or AGENT_OPENING
 
     def _bind_agent(self, window):
         """Bind a capture to the agent window just raised; its input field

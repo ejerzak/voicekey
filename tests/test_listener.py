@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import time
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 from evdev import ecodes
 
@@ -63,6 +64,14 @@ class DispatchTests(unittest.TestCase):
                          [("/dev/input/event3", ecodes.KEY_F9, 1),
                           ("/dev/input/event3", ecodes.KEY_F9, 0)])
         self.assertEqual(on_activity.call_count, 2, "a key and a click; no repeats, no releases")
+
+    def test_key_time_is_when_the_key_moved_not_when_it_was_read(self):
+        on_key = Mock()
+        listener = KeyboardListener({ecodes.KEY_F9}, on_key, Mock(), Mock(), Mock())
+        event = _event(ecodes.KEY_F9, 0)
+        event.timestamp.return_value = time.time() - 0.3  # read 300 ms late
+        listener.dispatch("/dev/input/event3", [event])
+        self.assertAlmostEqual(time.monotonic() - on_key.call_args.kwargs["at"], 0.3, delta=0.05)
 
     def test_modifiers_alone_are_not_activity(self):
         # The Copilot key reports Left Meta + Left Shift + F23; a Shift held
@@ -144,4 +153,4 @@ class LostEventTests(unittest.TestCase):
             _event(ecodes.SYN_DROPPED, 0, ecodes.EV_SYN), _event(ecodes.KEY_F9, 1),
             _event(ecodes.SYN_REPORT, 0, ecodes.EV_SYN), _event(ecodes.KEY_F9, 0)])
         lost.assert_called_once_with('fake')
-        key.assert_called_once_with('fake', ecodes.KEY_F9, 0)
+        key.assert_called_once_with('fake', ecodes.KEY_F9, 0, at=ANY)
