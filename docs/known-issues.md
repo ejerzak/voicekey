@@ -66,7 +66,8 @@ paste and stronger field-specific integrations remain possible future work.
 
 ## Headed Playwright MCP work steals compositor focus
 
-**Status:** open on the Playwright side (observed 2026-09-04). Following
+**Status:** mitigated on niri by a window rule (2026-10-15; observed
+2026-09-04). Following
 the 2026-09-05 audit, voicekey no longer treats a new activation in the same
 window as proof of the original field. It preserves/copies the final transcript
 and leaves potentially retained provisional text alone. Emacs uses an
@@ -87,21 +88,33 @@ preedit differently: some appear to commit the provisional transcript, while
 others discard it entirely. The final transcript then cannot reliably replace
 the provisional text in its original field.
 
-Preferred fix: stop Playwright MCP (or its headed-browser integration) from
-requesting compositor focus during background operations while leaving the
-browser visible and manually usable. Investigate whether the focus request
-comes from browser creation, page or popup creation, or an explicit
-`bringToFront`-style operation, and whether Playwright MCP can reuse an
-existing visible browser without activating its windows. A compositor rule
-that declines activation from this browser/profile may be a fallback.
+Mitigation, tested 2026-10-15 on niri 26.04 with Playwright MCP driving
+Google Chrome (app ID `google-chrome`): niri focuses new windows by default,
+and a window rule stops that for Chrome:
+
+```kdl
+window-rule {
+    match app-id=r#"^google-chrome$"#
+    open-focused false
+}
+```
+
+With the rule, launching the browser, opening a tab and switching tabs
+(`bringToFront`) all left focus on the user's window. Tab switching sends an
+xdg-activation request without a serial, which niri answers by marking the
+window urgent rather than focusing it. The theft was not reproduced without
+the rule, so window creation as its source is inferred. Popups and
+`window.open` windows were not tested; they are Chrome windows and fall under
+the same rule. The rule matches every Chrome window, so it suits a setup where
+Chrome serves only automation. Other compositors need their own equivalent.
 
 Voicekey's defensive behavior is now implemented: an acknowledged Emacs buffer
 pin survives compositor focus changes; generic delivery stays bound to its
 original Wayland activation. A later activation cannot prove field identity,
 so generic final text is preserved/copied instead of automatically rebound.
 Emacs still uses shared Wayland previews, which can deactivate independently
-of its pinned final insertion. Preventing the original focus theft remains
-the outstanding Playwright/compositor work.
+of its pinned final insertion. These defences remain for focus changes the
+rule does not cover.
 
 ## Emacs dictation appears lost after read-only buffer refusal
 
