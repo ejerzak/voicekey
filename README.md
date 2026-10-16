@@ -37,8 +37,9 @@ sudo usermod -aG input "$USER"   # then log out and back in
 ```
 
 The installer sets up Python, downloads the models, enables `voicekey.service`,
-and, if DMS is installed, links its widget: add **Voicekey** in DMS Settings →
-DankBar → Widgets. Keep the checkout, and rerun `./install.sh` after upgrading.
+and, if DMS is installed, links its plugins: add the **Voicekey** widget in
+DMS Settings → DankBar → Widgets. Keep the checkout, and rerun `./install.sh`
+after upgrading.
 
 **Default hotkeys:** Right Win (`KEY_RIGHTMETA`) for dictation, Right Alt + Right Win for the agent.
 For the agent chord, hold Right Alt before pressing Right Win: a tap raises the Hermes terminal, a hold also dictates into it (you press Enter).

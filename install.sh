@@ -13,58 +13,86 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 VENV="$HOME/.local/share/voicekey/venv"
 CONFIG="$HOME/.config/voicekey/config.toml"
 UNIT="$HOME/.config/systemd/user/voicekey.service"
-WIDGET="${XDG_CONFIG_HOME:-$HOME/.config}/DankMaterialShell/plugins/Voicekey"
+PLUGINS="${XDG_CONFIG_HOME:-$HOME/.config}/DankMaterialShell/plugins"
 
-install_widget() {
-    if ! command -v dms >/dev/null; then
-        echo "  DMS: not installed; skipping the optional widget (rerun install.sh after installing DMS)."
-        return
-    fi
-    if [[ -e "$WIDGET" || -L "$WIDGET" ]]; then
-        if [[ ! -L "$WIDGET" || "$(readlink -f "$WIDGET")" != "$HERE/contrib/dms/Voicekey" ]]; then
-            echo "  DMS: leaving existing $WIDGET untouched; see README.md for manual widget setup."
-            return
+# Link contrib/dms/NAME into DMS's plugins; refuse to replace anything else.
+link_plugin() {
+    local link="$PLUGINS/$1" source="$HERE/contrib/dms/$1"
+    if [[ -e "$link" || -L "$link" ]]; then
+        if [[ ! -L "$link" || "$(readlink -f "$link")" != "$source" ]]; then
+            echo "  DMS: leaving existing $link untouched; see docs/reference.md for manual setup."
+            return 1
         fi
-    else
-        if ! mkdir -p "$(dirname "$WIDGET")" || ! ln -s "$HERE/contrib/dms/Voicekey" "$WIDGET"; then
-            echo "  DMS: could not link widget; see README.md for manual setup."
-            return
-        fi
+    elif ! mkdir -p "$PLUGINS" || ! ln -s "$source" "$link"; then
+        echo "  DMS: could not link $link; see docs/reference.md for manual setup."
+        return 1
     fi
-    echo "  DMS: $WIDGET -> $HERE/contrib/dms/Voicekey"
+    echo "  DMS: $link -> $source"
+}
+
+# Enable plugin ID once a scan has found it; succeed when it is loaded.
+enable_plugin() {
     local reply attempt
     # IPC can succeed as a command while reporting an application-level error.
-    if reply=$(timeout 3s dms ipc call plugin-scan scan 2>/dev/null) && [[ "$reply" == *SCAN_TRIGGERED:* ]]; then
-        for ((attempt = 0; attempt < 10; attempt++)); do
-            if ! reply=$(timeout 3s dms ipc call plugins status voicekey 2>/dev/null); then
-                break
-            fi
-            case "$reply" in
-                loaded) break ;;
-                disabled)
-                    if reply=$(timeout 3s dms ipc call plugins enable voicekey 2>/dev/null) && [[ "$reply" == *PLUGIN_ENABLE_SUCCESS:* ]]; then
-                        reply=loaded
-                    fi
-                    break ;;
-            esac
-            sleep 0.5
-        done
-        if [[ "$reply" == loaded ]]; then
-            echo "  DMS: Voicekey enabled. Add it in DMS Settings → DankBar → Widgets."
-            return
+    for ((attempt = 0; attempt < 10; attempt++)); do
+        if ! reply=$(timeout 3s dms ipc call plugins status "$1" 2>/dev/null); then
+            return 1
         fi
+        case "$reply" in
+            loaded) return 0 ;;
+            disabled)
+                if reply=$(timeout 3s dms ipc call plugins enable "$1" 2>/dev/null) &&
+                        [[ "$reply" == *PLUGIN_ENABLE_SUCCESS:* ]]; then
+                    return 0
+                fi
+                return 1 ;;
+        esac
+        sleep 0.5
+    done
+    return 1
+}
+
+# The bar widget, and the hook that makes clicking the agent window in the
+# dock an agent-key tap.
+install_plugins() {
+    if ! command -v dms >/dev/null; then
+        echo "  DMS: not installed; skipping the optional plugins (rerun install.sh after installing DMS)."
+        return
     fi
-    echo "  DMS: widget linked, but automatic enabling was unavailable. With DMS running, use:"
-    echo "       dms ipc call plugin-scan scan"
-    echo "       # Once scanning finishes:"
-    echo "       dms ipc call plugins enable voicekey"
-    echo "       Then add Voicekey in DMS Settings → DankBar → Widgets."
+    local linked=() pending=() id reply
+    if link_plugin Voicekey; then linked+=(voicekey); fi
+    if link_plugin HermesSidebar; then linked+=(hermesSidebar); fi
+    if ((${#linked[@]} == 0)); then
+        return
+    fi
+    if reply=$(timeout 3s dms ipc call plugin-scan scan 2>/dev/null) && [[ "$reply" == *SCAN_TRIGGERED:* ]]; then
+        for id in "${linked[@]}"; do
+            if enable_plugin "$id"; then
+                echo "  DMS: $id enabled."
+            else
+                pending+=("$id")
+            fi
+        done
+    else
+        pending=("${linked[@]}")
+    fi
+    if ((${#pending[@]})); then
+        echo "  DMS: plugins linked, but automatic enabling was unavailable. With DMS running, use:"
+        echo "       dms ipc call plugin-scan scan"
+        echo "       # Once scanning finishes:"
+        for id in "${pending[@]}"; do
+            echo "       dms ipc call plugins enable $id"
+        done
+    fi
+    if [[ " ${linked[*]} " == *" voicekey "* ]]; then
+        echo "  DMS: add Voicekey to the bar in DMS Settings → DankBar → Widgets."
+    fi
 }
 
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
     echo "  Would create $VENV (python 3.12 via uv), install $HERE, download models,"
     echo "  link $UNIT -> $HERE/voicekey.service, enable voicekey.service and run --check"
-    echo "  If dms is installed, link $WIDGET and enable the widget when DMS is running."
+    echo "  If dms is installed, link its plugins into $PLUGINS and enable them when DMS is running."
     exit 0
 fi
 
@@ -115,4 +143,4 @@ if [[ "$status" != 2 ]] && systemctl --user is-active --quiet graphical-session.
     systemctl --user restart voicekey.service
     echo "  voicekey.service restarted"
 fi
-install_widget
+install_plugins

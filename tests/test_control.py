@@ -117,6 +117,16 @@ class ControlTests(unittest.TestCase):
             pass
         self.assertEqual(reply, {'type': 'reply', 'id': 'capture-a', 'error': None, 'capture_id': 'abc'})
 
+    def test_agent_tap_is_advertised_accepted_and_replies_with_what_it_did(self):
+        client, stream = self.connect()
+        self.assertIn('agent-tap', request('status', self.path)['capabilities'])
+        client.sendall(b'{"command":"agent-tap","id":1}\n')
+        wait_for(lambda: not self.server.commands.empty())
+        self.server.drain(Mock(return_value={'agent': 'parked'}))
+        while (reply := json.loads(stream.readline()))['type'] != 'reply':
+            pass
+        self.assertEqual(reply, {'type': 'reply', 'id': 1, 'error': None, 'agent': 'parked'})
+
     def test_draft_toggle_commands_are_advertised_and_update_socket_status(self):
         daemon = Daemon(Config(), journal=Journal(self.tmp.name + '/sessions'))
         self.addCleanup(daemon.close)

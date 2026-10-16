@@ -405,12 +405,9 @@ class Daemon:
         else:
             agent_window = None
             if action == "agent":
-                before = (focus.window_id() if self.cfg.agent.park_workspace
-                          and focus.compositor() == "niri" else None)
-                if (agent_window := self._raise_agent()) is None:
+                agent_window, parkable = self._press_agent()
+                if agent_window is None:
                     return
-                if before is not None and before == agent_window:
-                    parkable = agent_window
             self._start(device, chord, behavior, action,
                         "release to insert; tap only raises the agent" if behavior == TAP_HOLD else
                         "press again to stop" if behavior == TOGGLE else "release to stop",
@@ -433,6 +430,15 @@ class Daemon:
             self._finish(discard=tap)
             if tap and park is not None:
                 self.pipeline.park_agent(park)
+
+    def _press_agent(self):
+        """Raise the agent as an agent-key press does: (window, parkable).
+        WINDOW is as from _raise_agent; PARKABLE is that window when it
+        already had focus under agent.park_workspace, so a tap parks it."""
+        before = (focus.window_id() if self.cfg.agent.park_workspace
+                  and focus.compositor() == "niri" else None)
+        window = self._raise_agent()
+        return window, (window if before is not None and before == window else None)
 
     def _raise_agent(self):
         """Raise the agent for a capture: its window id, AGENT_OPENING while
@@ -640,6 +646,7 @@ class Daemon:
                 "tracking_notice": persistent.tracking_notice if persistent is not None else "",
                 "allow_typing": persistent.allow_typing if persistent is not None else False,
                 "can_follow": focus.compositor() == "niri",
+                "agent_title": self.cfg.agent.terminal_title,
                 "destination": destination.describe() if destination is not None else "",
                 "destination_name": getattr(destination, "application_name", "") if destination is not None else "",
                 "model": self.cfg.backend.type,
@@ -747,6 +754,21 @@ class Daemon:
                 raise ValueError("Follow focus currently requires Niri")
             policies = {"pause-on-switch": "pause", "follow-focus": "follow", "pin": "pin"}
             self.cfg.persistent.destination_policy = policies[command]
+        elif command == "agent-tap":
+            # An agent-key tap without its throwaway capture, for clicks on the
+            # agent window elsewhere (the DMS Hermes plugin).
+            if self.persistent is not None or self.session is not None:
+                raise ValueError("Finish the current dictation before using the agent")
+            window, parkable = self._press_agent()
+            if window is None:
+                raise ValueError("The agent needs niri to find its window")
+            if window == AGENT_OPENING:
+                self.pipeline.open_agent()
+                return {"agent": "opening"}
+            if parkable is not None:
+                self.pipeline.park_agent(parkable)
+                return {"agent": "parked"}
+            return {"agent": "raised"}
         else:
             raise ValueError("Unknown control command")
 

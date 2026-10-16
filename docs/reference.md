@@ -432,6 +432,9 @@ window-rule {
 }
 ```
 
+With DankMaterialShell, the [Hermes Sidebar](#dms-bar-widget) plugin gives
+the terminal's dock icon the same tap behavior.
+
 ## Diagnostics
 
 ```sh
@@ -595,17 +598,30 @@ For a permanent default, set `[persistent] destination_policy` in your Voicekey 
 Window policies do not distinguish tabs or panes inside one window; losing an
 input-method field activation also pauses dictation.
 
-`./install.sh` links the widget when DMS is installed and enables it if DMS is
-running. Rerun it after upgrading to add the widget to an existing installation.
-If DMS is stopped, it prints the commands to enable the widget later.
-To install only the widget manually from this checkout:
+A second plugin, [Hermes Sidebar](../contrib/dms/HermesSidebar), makes
+clicking the agent terminal's dock icon act like a tap of the agent key: with
+`park_workspace` the terminal comes to the focused workspace, and a click
+while it has focus parks it again. The bar's RunningApps and AppsDock widgets
+behave the same; the workspace switcher's window icons, and the AppsDock
+widget's window list, still go to the terminal's workspace. The plugin
+recognizes the terminal by the daemon's `agent_title` and sends `agent-tap`
+over the control socket. While the daemon is offline, clicks focus the
+terminal as DMS normally would. Its tests run against mock DMS services in
+`tests/test_dms_plugins.py`, which needs `qs` in a Wayland session.
+
+`./install.sh` links both plugins when DMS is installed and enables them if
+DMS is running. Rerun it after upgrading to add them to an existing
+installation. If DMS is stopped, it prints the commands to enable them later.
+To install only the plugins manually from this checkout:
 
 ```bash
 mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/DankMaterialShell/plugins"
 ln -s "$PWD/contrib/dms/Voicekey" "${XDG_CONFIG_HOME:-$HOME/.config}/DankMaterialShell/plugins/Voicekey"
+ln -s "$PWD/contrib/dms/HermesSidebar" "${XDG_CONFIG_HOME:-$HOME/.config}/DankMaterialShell/plugins/HermesSidebar"
 dms ipc call plugin-scan scan
 # Once scanning finishes:
 dms ipc call plugins enable voicekey
+dms ipc call plugins enable hermesSidebar
 ```
 
 Add **Voicekey** to your bar in DMS Settings → DankBar → Widgets. Restart
@@ -626,6 +642,7 @@ The same control interface is available in a terminal:
 ~/.local/share/voicekey/venv/bin/python -m voicekey --control start
 ~/.local/share/voicekey/venv/bin/python -m voicekey --control stop
 ~/.local/share/voicekey/venv/bin/python -m voicekey --control pause-on-switch # while idle; or: follow-focus, pin
+~/.local/share/voicekey/venv/bin/python -m voicekey --control agent-tap       # as a tap of the agent key
 ```
 
 The daemon publishes status and accepts these commands over a private Unix
@@ -656,7 +673,8 @@ rolling cleanup, and acceptance/cancellation behavior.
 `capabilities` lists optional protocol extensions (treat an absent field as an
 empty list). `capture-client-name` permits `capture-start.args.client_name`;
 `capture-preview` permits `capture-start.args.preview`. `draft-toggle` advertises
-the idle-only `draft-on` and `draft-off` commands.
+the idle-only `draft-on` and `draft-off` commands. `agent-tap` advertises the
+`agent-tap` command and the `agent_title` status field.
 For an active client capture, `destination_name` is that supplied label, or
 `Client` when unnamed; `destination` describes the socket client. Desktop
 captures retain their actual window destination, such as Ghostty. A client label
@@ -667,8 +685,8 @@ and optional `args` (object, default `{}`). Use distinct IDs for outstanding
 requests. Replies are `{"type":"reply","id":ID,"error":null,...}` on success,
 or have a human-readable `error` string on refusal. The existing commands are
 `status`, `start`, `start-typing`, `stop`, `cancel`, `draft-on`, `draft-off`,
-`pause-on-switch`, `follow-focus`, `pin`
-and `free-memory`; they take no arguments. `status` replies include current
+`pause-on-switch`, `follow-focus`, `pin`, `free-memory`
+and `agent-tap`; they take no arguments. `status` replies include current
 status fields. `start` addresses desktop dictation. `stop` finishes the active
 recording, including a client capture, and is available from any connection
 without a capture ID. A client capture's result still goes to its original owner.
@@ -680,6 +698,14 @@ accepting it and can unload models while the prepared draft awaits a decision.
 sessions until daemon restart. They refuse active captures, pending processing,
 and drafts awaiting a decision. Enabling drafts also enables the configured
 cancellation shortcut immediately; disabling restores ordinary key handling.
+
+When `agent-tap` is advertised, the `agent-tap` command does what a tap of the
+agent key does, without the tap's throwaway recording: it opens the agent
+terminal, raises it, or with `park_workspace` parks it when it already had
+focus. Its reply adds `agent`: `"opening"`, `"raised"` or `"parked"`. It
+refuses during dictation and without niri. Status then also carries
+`agent_title`, the configured `terminal_title`, so a client can recognize the
+agent window; the [Hermes Sidebar](#dms-bar-widget) plugin uses both.
 
 A complete capture exchange looks like this (angle brackets mark example IDs):
 

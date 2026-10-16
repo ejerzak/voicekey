@@ -311,6 +311,56 @@ class ControllerTests(unittest.TestCase):
         self.assertIsNone(self.daemon.session)
         self.daemon.pipeline.focus_agent.assert_not_called()
 
+    def tap_command(self, *, focused, opening=False):
+        """Send agent-tap with parking on, the agent window (7) having focus
+        beforehand or not; return the reply and the park_agent mock."""
+        self.cfg.agent.park_workspace = 'hermes'
+        self.daemon.pipeline.park_agent = Mock()
+        if opening:
+            self.daemon.pipeline.focus_agent.return_value = None
+        with patch('voicekey.daemon.focus.window_id', return_value=7 if focused else 3):
+            reply = self.daemon.command('agent-tap')
+        self.assertIsNone(self.daemon.session)
+        self.assertFalse(self.daemon.pipeline.ledger.busy)
+        return reply, self.daemon.pipeline.park_agent
+
+    def test_agent_tap_command_raises_an_agent_that_lacked_focus_without_recording(self):
+        reply, park = self.tap_command(focused=False)
+        self.assertEqual(reply, {'agent': 'raised'})
+        self.daemon.pipeline.focus_agent.assert_called_once_with()
+        park.assert_not_called()
+        self.assertEqual(self.targets, [])
+
+    def test_agent_tap_command_parks_an_agent_that_already_had_focus(self):
+        reply, park = self.tap_command(focused=True)
+        self.assertEqual(reply, {'agent': 'parked'})
+        park.assert_called_once_with(7)
+
+    def test_agent_tap_command_opens_a_closed_agent(self):
+        reply, park = self.tap_command(focused=False, opening=True)
+        self.assertEqual(reply, {'agent': 'opening'})
+        self.daemon.pipeline.open_agent.assert_called_once_with()
+        park.assert_not_called()
+
+    def test_agent_tap_command_is_refused_during_dictation(self):
+        self.key(1)
+        self.assertIsNotNone(self.daemon.session)
+        with self.assertRaises(ValueError):
+            self.daemon.command('agent-tap')
+        self.daemon.pipeline.focus_agent.assert_not_called()
+        self.key(0)
+        self.done()
+
+    def test_agent_tap_command_needs_niri(self):
+        with patch('voicekey.daemon.focus.compositor', return_value='sway'):
+            with self.assertRaises(ValueError):
+                self.daemon.command('agent-tap')
+        self.daemon.pipeline.focus_agent.assert_not_called()
+
+    def test_status_names_the_agent_window(self):
+        self.cfg.agent.terminal_title = 'Agent'
+        self.assertEqual(self.daemon.status()['agent_title'], 'Agent')
+
     def test_agent_slot_serializes_opening_and_raising(self):
         pipeline = self.daemon.pipeline
         shown, release = threading.Event(), threading.Event()
