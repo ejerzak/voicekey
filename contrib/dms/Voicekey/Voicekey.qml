@@ -2,8 +2,9 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Common
+import qs.DCommon.Common as DCommon
 import qs.Services
-import qs.Widgets
+import qs.DCommon.Widgets
 import qs.Modules.Plugins
 
 PluginComponent {
@@ -123,7 +124,7 @@ PluginComponent {
         }
     }
 
-    DankSocket {
+    DCommon.DSocket {
         id: control
         path: Quickshell.env("XDG_RUNTIME_DIR") + "/voicekey/control.sock"
         connected: true
@@ -180,7 +181,7 @@ PluginComponent {
     horizontalBarPill: Component {
         Row {
             spacing: Theme.spacingXS
-            DankIcon {
+            DIcon {
                 name: root.stateIcon
                 size: root.iconSize
                 color: root.stateColor
@@ -198,7 +199,7 @@ PluginComponent {
         }
     }
     verticalBarPill: Component {
-        DankIcon {
+        DIcon {
             name: root.stateIcon
             size: root.iconSize
             color: root.stateColor
@@ -232,7 +233,7 @@ PluginComponent {
                     font.pixelSize: Theme.fontSizeSmall
                     color: Theme.surfaceVariantText
                 }
-                DankButton {
+                DButton {
                     width: parent.width
                     text: root.status.draft_mode ? "Accept draft" : root.listening ? "Stop listening" : "Start listening"
                     iconName: root.status.draft_mode ? "check" : root.listening ? "stop" : "mic"
@@ -247,7 +248,7 @@ PluginComponent {
                         }
                     }
                 }
-                DankButton {
+                DButton {
                     width: parent.width
                     visible: root.status.draft_mode === true
                     text: "Discard draft"
@@ -262,7 +263,7 @@ PluginComponent {
                         {policy: "follow", label: "Follow focused window", command: "follow-focus"},
                         {policy: "pin", label: "Stay at original destination", command: "pin"}
                     ]
-                    delegate: DankButton {
+                    delegate: DButton {
                         required property var modelData
                         width: parent.width
                         text: modelData.label
@@ -282,7 +283,7 @@ PluginComponent {
                     font.pixelSize: Theme.fontSizeSmall
                     color: Theme.surfaceVariantText
                 }
-                DankButton {
+                DButton {
                     width: parent.width
                     visible: root.canToggleDraft
                     text: root.status.draft_enabled ? "Draft mode: on" : "Draft mode: off"
@@ -298,7 +299,7 @@ PluginComponent {
                     font.pixelSize: Theme.fontSizeSmall
                     color: Theme.surfaceVariantText
                 }
-                DankButton {
+                DButton {
                     width: parent.width
                     visible: root.status.state === "paused" && root.status.can_type === true
                     text: "Use simulated typing this session"
@@ -318,7 +319,7 @@ PluginComponent {
                     font.pixelSize: Theme.fontSizeSmall
                     color: Theme.surfaceVariantText
                 }
-                DankButton {
+                DButton {
                     width: parent.width
                     text: root.status.unload_pending ? "Freeing memory…" : "Free memory"
                     iconName: "memory"
@@ -333,7 +334,7 @@ PluginComponent {
                     font.pixelSize: Theme.fontSizeSmall
                     color: Theme.surfaceVariantText
                 }
-                DankButton {
+                DButton {
                     width: parent.width
                     text: root.stopping ? "Disabling…" : root.starting ? "Starting…"
                         : root.online || root.serviceState === "active" || root.serviceState === "activating"

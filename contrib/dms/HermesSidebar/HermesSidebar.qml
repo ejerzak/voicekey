@@ -1,7 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
-import qs.Common
+import qs.DCommon.Common
 import qs.Services
 
 // Clicking the agent (Hermes) window in DMS acts like an agent-key tap: the
@@ -93,7 +93,7 @@ Item {
         function onIsNiriChanged() { root.install(); }
     }
 
-    DankSocket {
+    DSocket {
         id: control
         path: Quickshell.env("XDG_RUNTIME_DIR") + "/voicekey/control.sock"
         connected: true

@@ -13,7 +13,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 VENV="$HOME/.local/share/voicekey/venv"
 CONFIG="$HOME/.config/voicekey/config.toml"
 UNIT="$HOME/.config/systemd/user/voicekey.service"
-PLUGINS="${XDG_CONFIG_HOME:-$HOME/.config}/DankMaterialShell/plugins"
+PLUGINS="${XDG_CONFIG_HOME:-$HOME/.config}/dms/plugins"
 
 # Link contrib/dms/NAME into DMS's plugins; refuse to replace anything else.
 link_plugin() {
@@ -85,7 +85,7 @@ install_plugins() {
         done
     fi
     if [[ " ${linked[*]} " == *" voicekey "* ]]; then
-        echo "  DMS: add Voicekey to the bar in DMS Settings → DankBar → Widgets."
+        echo "  DMS: add Voicekey to the bar in DMS Settings → Bar widgets."
     fi
 }
 

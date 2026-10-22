@@ -1,6 +1,6 @@
 import QtQuick
 
-// Mock of DMS's DankSocket: records sends; tests feed lines to the parser.
+// Mock of DMS's DSocket: records sends; tests feed lines to the parser.
 Item {
     property string path: ""
     property var parser: null

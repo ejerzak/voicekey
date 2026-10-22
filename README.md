@@ -16,7 +16,7 @@ Fedora with Niri is the tested setup.
 ## Requirements
 
 - Linux with a systemd user session, Niri, PipeWire and a microphone
-- DankMaterialShell for the bar widget (optional)
+- DMS (Dux Shell) 2.0 or later for the bar widgets (optional)
 - `uv`, `gcc`, `pw-record`, `wtype`, `wl-copy`, `notify-send`
 - Read access to keyboards (the `input` group)
 
@@ -38,7 +38,7 @@ sudo usermod -aG input "$USER"   # then log out and back in
 
 The installer sets up Python, downloads the models, enables `voicekey.service`,
 and, if DMS is installed, links its plugins: add the **Voicekey** widget in
-DMS Settings → DankBar → Widgets. Keep the checkout, and rerun `./install.sh`
+DMS Settings → Bar widgets. Keep the checkout, and rerun `./install.sh`
 after upgrading.
 
 **Default hotkeys:** Right Win (`KEY_RIGHTMETA`) for dictation, Right Alt + Right Win for the agent.

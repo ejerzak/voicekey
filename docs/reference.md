@@ -432,7 +432,7 @@ window-rule {
 }
 ```
 
-With DankMaterialShell, the [Hermes Sidebar](#dms-bar-widget) plugin gives
+With DMS, the [Hermes Sidebar](#dms-bar-widget) plugin gives
 the terminal's dock icon the same tap behavior.
 
 ## Diagnostics
@@ -588,7 +588,7 @@ the DMS widget; there is no automatic popup fallback for routine status.
 
 ## DMS bar widget
 
-On Niri with DankMaterialShell, the optional [Voicekey widget](../contrib/dms/Voicekey)
+On Niri with DMS (Dux Shell) 2.0 or later, the optional [Voicekey widget](../contrib/dms/Voicekey)
 shows a microphone icon and **Listening → destination** for the whole capture,
 including silence. Automatically stopped sessions show **Off · reason**; they
 never resume without another start. Muted or missing microphones show a warning. The popout has
@@ -615,16 +615,16 @@ installation. If DMS is stopped, it prints the commands to enable them later.
 To install only the plugins manually from this checkout:
 
 ```bash
-mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/DankMaterialShell/plugins"
-ln -s "$PWD/contrib/dms/Voicekey" "${XDG_CONFIG_HOME:-$HOME/.config}/DankMaterialShell/plugins/Voicekey"
-ln -s "$PWD/contrib/dms/HermesSidebar" "${XDG_CONFIG_HOME:-$HOME/.config}/DankMaterialShell/plugins/HermesSidebar"
+mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/dms/plugins"
+ln -s "$PWD/contrib/dms/Voicekey" "${XDG_CONFIG_HOME:-$HOME/.config}/dms/plugins/Voicekey"
+ln -s "$PWD/contrib/dms/HermesSidebar" "${XDG_CONFIG_HOME:-$HOME/.config}/dms/plugins/HermesSidebar"
 dms ipc call plugin-scan scan
 # Once scanning finishes:
 dms ipc call plugins enable voicekey
 dms ipc call plugins enable hermesSidebar
 ```
 
-Add **Voicekey** to your bar in DMS Settings → DankBar → Widgets. Restart
+Add **Voicekey** to your bar in DMS Settings → Bar widgets. Restart
 `voicekey.service` after updating the Python code. The widget reconnects if
 the service restarts; it never starts recording automatically or unmutes a mic.
 Opening the panel uses a shell layer, not a dictation destination. Starting
