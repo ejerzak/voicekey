@@ -46,7 +46,8 @@ ShellRoot {
 
     function run() {
         const C = CompositorService;
-        C.sortedToplevels = [C.snapshot(15, "Voicekey Hermes"), C.snapshot(19, "other shell")];
+        C.sortedToplevels = [C.snapshot(15, "Voicekey Hermes"),
+                             C.snapshot(19, "Voicekey Hermes", "com.mitchellh.ghostty")];
         let p = plugin.createObject(shell);
         let socket = socketOf(p);
         check("nothing is hooked before the daemon names its window", p.wrapped.length === 0
@@ -54,7 +55,8 @@ ShellRoot {
 
         status(socket);
         check("the daemon's window is hooked", JSON.stringify(p.wrapped.map(w => w.niriWindowId)) === "[15]");
-        check("other Ghostty windows are untouched", C.sortedToplevels[1].activate.hooks === undefined);
+        check("a plain Ghostty window with the agent's title is untouched",
+              C.sortedToplevels[1].activate.hooks === undefined);
 
         C.sortedToplevels[0].activate();
         check("a click sends agent-tap instead of focusing", taps(socket) === 1 && C.focused.length === 0);

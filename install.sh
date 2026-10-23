@@ -14,6 +14,29 @@ VENV="$HOME/.local/share/voicekey/venv"
 CONFIG="$HOME/.config/voicekey/config.toml"
 UNIT="$HOME/.config/systemd/user/voicekey.service"
 PLUGINS="${XDG_CONFIG_HOME:-$HOME/.config}/dms/plugins"
+DESKTOP="${XDG_DATA_HOME:-$HOME/.local/share}/applications/dev.voicekey.Hermes.desktop"
+HERMES_ICON="${HERMES_HOME:-$HOME/.hermes}/hermes-agent/apps/desktop/assets/icon-dark.png"
+
+# The agent terminal's desktop entry, named for its app ID (TERMINAL_APP_ID in
+# voicekey/agent.py): docks show Hermes as its own app, so it can be pinned,
+# and launching it is an agent-key tap. Written rather than linked because
+# Exec needs this venv's absolute path.
+install_desktop_entry() {
+    local icon=utilities-terminal
+    if [[ -f "$HERMES_ICON" ]]; then icon="$HERMES_ICON"; fi
+    mkdir -p "$(dirname "$DESKTOP")"
+    cat > "$DESKTOP" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Voicekey Hermes
+Comment=Open or raise the Hermes terminal, like a tap of the agent key
+Exec="$VENV/bin/python" -m voicekey --control agent-tap
+Icon=$icon
+StartupWMClass=dev.voicekey.Hermes
+Terminal=false
+EOF
+    echo "  DESKTOP: $DESKTOP"
+}
 
 # Link contrib/dms/NAME into DMS's plugins; refuse to replace anything else.
 link_plugin() {
@@ -91,7 +114,8 @@ install_plugins() {
 
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
     echo "  Would create $VENV (python 3.12 via uv), install $HERE, download models,"
-    echo "  link $UNIT -> $HERE/voicekey.service, enable voicekey.service and run --check"
+    echo "  link $UNIT -> $HERE/voicekey.service, enable voicekey.service and run --check,"
+    echo "  and write the Hermes terminal's desktop entry $DESKTOP"
     echo "  If dms is installed, link its plugins into $PLUGINS and enable them when DMS is running."
     exit 0
 fi
@@ -143,4 +167,5 @@ if [[ "$status" != 2 ]] && systemctl --user is-active --quiet graphical-session.
     systemctl --user restart voicekey.service
     echo "  voicekey.service restarted"
 fi
+install_desktop_entry
 install_plugins

@@ -2,7 +2,7 @@
   "id": "hermesSidebar",
   "name": "Hermes Sidebar",
   "description": "Clicking the Voicekey agent window in the dock acts like an agent-key tap",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": "Voicekey contributors",
   "type": "daemon",
   "capabilities": ["daemon"],

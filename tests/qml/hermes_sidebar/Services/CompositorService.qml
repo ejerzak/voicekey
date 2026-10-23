@@ -8,8 +8,8 @@ Singleton {
     property var sortedToplevels: []
     property var focused: []
 
-    function snapshot(id, title) {
-        return {appId: "com.mitchellh.ghostty", title: title, niriWindowId: id,
+    function snapshot(id, title, appId) {
+        return {appId: appId || "dev.voicekey.Hermes", title: title, niriWindowId: id,
                 activate: function () { focused.push(id); }};
     }
 }

@@ -410,7 +410,9 @@ over OpenSSH with strict host-key checking; the local Ghostty forwards typed
 text over ssh.
 
 The agent key needs niri, which lets voicekey find and raise the terminal by
-its title (`terminal_title`). The capture binds to that window as ordinary
+its app ID, `dev.voicekey.Hermes`, and title (`terminal_title`). A terminal
+opened by a voicekey older than that app ID goes unrecognized: close it once
+and the next press opens a new one. The capture binds to that window as ordinary
 dictation does; if focus has moved elsewhere by then, nothing is typed and
 the transcript is saved and copied.
 
@@ -425,7 +427,7 @@ floating there; voicekey brings a newly opened one over itself:
 workspace "hermes"
 
 window-rule {
-    match app-id="com.mitchellh.ghostty" title="^Voicekey Hermes$"
+    match app-id="dev.voicekey.Hermes" title="^Voicekey Hermes$"
     open-on-workspace "hermes"
     open-focused false
     open-floating true
@@ -434,6 +436,12 @@ window-rule {
 
 With DMS, the [Hermes Sidebar](#dms-bar-widget) plugin gives
 the terminal's dock icon the same tap behavior.
+
+`./install.sh` writes a desktop entry for that app ID,
+`~/.local/share/applications/dev.voicekey.Hermes.desktop`, so docks show the
+terminal as its own app, with Hermes's icon when Hermes is installed, rather
+than as one more Ghostty window. Pin it to give it a fixed place in the dock;
+while Hermes is closed, clicking the pin opens it.
 
 ## Diagnostics
 
@@ -604,7 +612,7 @@ clicking the agent terminal's dock icon act like a tap of the agent key: with
 while it has focus parks it again. The bar's RunningApps and AppsDock widgets
 behave the same; the workspace switcher's window icons, and the AppsDock
 widget's window list, still go to the terminal's workspace. The plugin
-recognizes the terminal by the daemon's `agent_title` and sends `agent-tap`
+recognizes the terminal by its app ID and the daemon's `agent_title`, and sends `agent-tap`
 over the control socket. While the daemon is offline, clicks focus the
 terminal as DMS normally would. Its tests run against mock DMS services in
 `tests/test_dms_plugins.py`, which needs `qs` in a Wayland session.

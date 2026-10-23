@@ -108,18 +108,19 @@ class AgentTests(unittest.TestCase):
             "tmux -L voicekey-hermes attach-session -t voicekey-hermes",
         )
         self.assertIn("--title=Voicekey Hermes", argv)
-        self.assertFalse(any(arg.startswith("--class=") for arg in argv))
+        self.assertIn("--class=dev.voicekey.Hermes", argv)
 
     @patch("voicekey.agent.focus.compositor", return_value="niri")
     @patch("voicekey.agent._require", return_value="/usr/bin/niri")
     @patch(
         "voicekey.agent._run",
         return_value=completed(
-            stdout='[{"id":3,"app_id":"com.mitchellh.ghostty","title":"Other"},'
-            '{"id":7,"app_id":"com.mitchellh.ghostty","title":"Voicekey Hermes"}]'
+            stdout='[{"id":3,"app_id":"dev.voicekey.Hermes","title":"Other"},'
+            '{"id":5,"app_id":"com.mitchellh.ghostty","title":"Voicekey Hermes"},'
+            '{"id":7,"app_id":"dev.voicekey.Hermes","title":"Voicekey Hermes"}]'
         ),
     )
-    def test_remote_terminal_window_is_identified_by_title(self, run, require, compositor):
+    def test_remote_terminal_window_is_identified_by_app_id_and_title(self, run, require, compositor):
         cfg = AgentConfig(terminal_title="Voicekey Hermes")
         self.assertTrue(agent._terminal_window_open(cfg))
         self.assertEqual(agent._terminal_window(cfg)["id"], 7)
@@ -303,6 +304,7 @@ class AgentTests(unittest.TestCase):
             "--collect",
         ])
         self.assertIn("/usr/bin/ghostty", argv)
+        self.assertIn("--class=dev.voicekey.Hermes", argv)  # its own app in docks
         self.assertEqual(argv[-6:], [
             "/usr/bin/tmux",
             "-L",

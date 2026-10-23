@@ -25,6 +25,10 @@ from .config import AgentConfig
 log = logging.getLogger("voicekey.agent")
 
 _POLL_SECONDS = 0.2
+# The terminal's Wayland app ID, which niri window rules match, and the name of
+# the desktop entry install.sh writes: Hermes is its own app in docks, so
+# it can be pinned apart from other Ghostty windows.
+TERMINAL_APP_ID = "dev.voicekey.Hermes"
 _operation = contextvars.ContextVar("voicekey_agent_operation", default=(float("inf"), None))
 
 
@@ -391,6 +395,7 @@ def _ensure_terminal(cfg: AgentConfig) -> bool:
             "--",
             terminal,
             f"--title={cfg.terminal_title}",
+            f"--class={TERMINAL_APP_ID}",
             "--gtk-single-instance=false",
             "-e",
             *attach_command,
@@ -443,12 +448,13 @@ def _niri_action(cfg: AgentConfig, *argv: str) -> None:
 
 
 def _terminal_window(cfg: AgentConfig) -> dict | None:
-    """niri's record of the local terminal showing the session, by title."""
+    """niri's record of the local terminal showing the session, by app ID
+    and title."""
     return next(
         (
             window
             for window in _niri_list(cfg, "windows")
-            if window.get("app_id") == "com.mitchellh.ghostty"
+            if window.get("app_id") == TERMINAL_APP_ID
             and window.get("title") == cfg.terminal_title
             and isinstance(window.get("id"), int)
         ),

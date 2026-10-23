@@ -37,7 +37,7 @@ Item {
         }
         const windows = [];
         for (const window of CompositorService.sortedToplevels) {
-            if (window.appId !== "com.mitchellh.ghostty"
+            if (window.appId !== "dev.voicekey.Hermes"
                     || window.title !== hooks.title
                     || window.niriWindowId === undefined)
                 continue;
