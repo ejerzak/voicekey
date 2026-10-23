@@ -437,8 +437,9 @@ class Daemon:
                 owner.starting_key_released(not tap)
         elif owner is self.session:
             self._finish(discard=tap)
-            if tap and park is not None:
-                self.pipeline.park_agent(park, profile=owner.agent_profile)
+        if tap and park is not None:
+            # Also when a failed microphone already ended the recording.
+            self.pipeline.park_agent(park, profile=owner.agent_profile)
 
     def _press_agent(self, profile=None):
         """Raise the agent as an agent-key press does: (window, parkable).
@@ -818,6 +819,13 @@ class Daemon:
                 self._retire_persistent()
         self._unload_when_idle()
         if self.session is None:
+            return
+        gesture = self._gesture
+        if (self.recorder.finished and gesture is not None and gesture[0] is self.session
+                and time.monotonic() - gesture[1] < self.cfg.tap_seconds):
+            # The source died (no microphone, say) while the press may still
+            # be a tap: the release decides, so a tap raises or parks the
+            # agent and drops the recording without an error.
             return
         if self.recorder.finished or self.recorder.elapsed >= self.cfg.max_seconds:
             if self.recorder.elapsed >= self.cfg.max_seconds:

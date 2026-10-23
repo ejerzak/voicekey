@@ -7,11 +7,13 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from evdev import ecodes
+import numpy as np
 
 from voicekey.config import AgentConfig, Config
 from voicekey.daemon import Daemon
 from voicekey.gate import Gate
 from voicekey.pipeline import Pipeline
+from voicekey.recorder import RecordingError
 from voicekey.recovery import Journal
 from tests.test_pipeline import FakeRecorder, FakeTarget, wait_for
 from tests.test_notify import queued_notifications
@@ -195,6 +197,48 @@ class ControllerTests(unittest.TestCase):
         self.parking_press(held=True, focused=True).assert_not_called()
         self.daemon.pipeline.deliveries.join()
         self.assertEqual(self.targets[0].calls[0][0], 'hello')
+
+    def failed_microphone_press(self, *, held):
+        """Press the agent key, focused agent (7) and parking on, and let the
+        recorder fail at once, as pw-record does with no microphone; then
+        tick once with the press HELD past the tap window or not. Return the
+        session."""
+        self.cfg.agent.park_workspace = 'hermes'
+        self.cfg.tap_seconds = 10  # keep the tap independent of scheduler delays
+        self.daemon.pipeline.park_agent = Mock()
+        with patch('voicekey.daemon.focus.window_id', return_value=7):
+            self.key(1, ecodes.KEY_RIGHTALT)
+            self.key(1, ecodes.KEY_RIGHTMETA)
+        session = self.daemon.session
+        self.daemon.recorder.finished = True
+        self.daemon.recorder.stop = Mock(side_effect=RecordingError(
+            'pw-record exited early (rc=1): no target node available', np.zeros(0, dtype=np.float32), 0.0))
+        if held:
+            self.daemon._gesture = (session, time.monotonic() - 11)
+        self.daemon._on_tick()
+        return session
+
+    def test_agent_tap_still_parks_and_drops_quietly_when_the_microphone_fails(self):
+        with patch('voicekey.pipeline.notify') as pipeline_notify:
+            session = self.failed_microphone_press(held=False)
+            self.assertIs(self.daemon.session, session, "the release decides what a possible tap was")
+            self.key(0, ecodes.KEY_RIGHTMETA)
+            self.key(0, ecodes.KEY_RIGHTALT)
+            self.done()
+        self.daemon.pipeline.park_agent.assert_called_once_with(7, profile=self.cfg.agent)
+        self.daemon.backend.transcribe.assert_not_called()
+        pipeline_notify.assert_not_called()
+        self.assertFalse(self.daemon.gate.held)
+
+    def test_agent_hold_reports_a_failed_microphone_before_release_and_does_not_park(self):
+        with patch('voicekey.pipeline.notify') as pipeline_notify:
+            self.failed_microphone_press(held=True)
+            self.assertIsNone(self.daemon.session)
+            self.done()
+            self.assertIn('no target node available', pipeline_notify.call_args.args[1])
+            self.key(0, ecodes.KEY_RIGHTMETA)
+            self.key(0, ecodes.KEY_RIGHTALT)
+        self.daemon.pipeline.park_agent.assert_not_called()
 
     def test_without_parking_the_agent_key_never_asks_for_focus(self):
         with patch('voicekey.daemon.focus.window_id') as window_id:
