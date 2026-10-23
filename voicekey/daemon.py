@@ -296,7 +296,7 @@ class Daemon:
             on_device_lost=self._on_device_lost, on_tick=self._on_tick,
             on_no_access=lambda message: notify("voicekey: no keyboard access", message, error=True),
             on_activity=self._on_activity,
-            required_keycodes=self._dictation_keys,
+            required_keycodes=self._dictation_keys, wake=self.control.wake,
         )
         log.info("listening: %s", ", ".join(self.bindings()))
         try:

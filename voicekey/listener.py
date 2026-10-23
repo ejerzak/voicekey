@@ -75,10 +75,12 @@ class KeyboardListener:
       on_no_access(message)                — no readable key devices (once per outage)
       on_activity()                        — any other key or button was pressed,
                                              modifiers aside (the fact only; never which one)
+    WAKE, if given, is a nonblocking socket that becomes readable when the
+    next tick should not wait for a key (a queued control command).
     """
 
     def __init__(self, keycodes: set[int], on_key, on_device_lost, on_tick,
-                 on_no_access, on_activity=None, *, required_keycodes=None) -> None:
+                 on_no_access, on_activity=None, *, required_keycodes=None, wake=None) -> None:
         self.keycodes = keycodes
         # Optional observed keys (e.g. draft cancellation) must not hide a
         # missing/inaccessible device that provides the dictation hotkey.
@@ -88,6 +90,7 @@ class KeyboardListener:
         self.on_tick = on_tick
         self.on_no_access = on_no_access
         self.on_activity = on_activity
+        self.wake = wake
         self.devices: dict[str, InputDevice] = {}
         self._last_rescan = 0.0
         self._no_access_reported = False
@@ -178,17 +181,25 @@ class KeyboardListener:
             elif ev.value == 1 and ev.code not in MODIFIERS and self.on_activity is not None:
                 self.on_activity()
 
+    def _drain_wake(self) -> None:
+        try:
+            self.wake.recv(4096)
+        except BlockingIOError:
+            pass
+
     def run(self) -> None:
         self._rescan()
+        wakes = [] if self.wake is None else [self.wake]
         while True:
             if not self.devices:
-                time.sleep(NO_ACCESS_RETRY)
+                if select.select(wakes, [], [], NO_ACCESS_RETRY)[0]:
+                    self._drain_wake()
                 self._rescan()
                 self.on_tick()
                 continue
             try:
                 readable, _, _ = select.select(
-                    list(self.devices.values()), [], [], 1.0
+                    list(self.devices.values()) + wakes, [], [], 1.0
                 )
             except (OSError, ValueError):
                 log.warning("keyboard select failed; reopening input devices")
@@ -200,6 +211,9 @@ class KeyboardListener:
             if time.monotonic() - self._last_rescan > RESCAN_INTERVAL:
                 self._rescan()
             for dev in readable:
+                if dev is self.wake:
+                    self._drain_wake()
+                    continue
                 if dev.path not in self.devices:
                     continue
                 events = self._read(dev)

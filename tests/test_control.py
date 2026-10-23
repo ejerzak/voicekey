@@ -1,6 +1,7 @@
 import json
 import os
 import queue
+import select
 import socket
 import tempfile
 import threading
@@ -52,6 +53,8 @@ class ControlTests(unittest.TestCase):
         client, stream = self.connect()
         client.sendall(b'{"command":"start","id":7}\n')
         wait_for(lambda: not self.server.commands.empty())
+        self.assertTrue(select.select([self.server.wake], [], [], 1)[0],
+                        'a queued command wakes the keyboard thread')
         handler = Mock(return_value=None)
         handler.assert_not_called()
         self.server.drain(handler)

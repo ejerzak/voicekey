@@ -41,6 +41,10 @@ class ControlServer:
         self.closed = threading.Event()
         self.thread = None
         self.listener = None
+        # Readable once a command is queued. The keyboard thread drains
+        # commands between key events, and waits on this so a dock click
+        # need not wait for the next key or its one-second timeout.
+        self.wake = self._waker = None
 
     def start(self):
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -64,6 +68,9 @@ class ControlServer:
             self.listener.close()
             self.listener = None
             raise
+        self.wake, self._waker = socket.socketpair()
+        self.wake.setblocking(False)
+        self._waker.setblocking(False)
         self.thread = threading.Thread(target=self._run, name='voicekey-control', daemon=True)
         self.thread.start()
 
@@ -184,6 +191,10 @@ class ControlServer:
                                              'protocol_version': PROTOCOL_VERSION, 'capabilities': CAPABILITIES, **self.status})
                                     else:
                                         self.commands.put_nowait((client, message, time.monotonic() + 2))
+                                        try:
+                                            self._waker.send(b'\0')
+                                        except BlockingIOError:
+                                            pass  # a wake is already pending
                             if client in clients and mask & selectors.EVENT_WRITE:
                                 data, offset, receipt, deadline, cancelled = outputs[client][0]
                                 if time.monotonic() >= deadline or cancelled is not None and cancelled.is_set():
@@ -229,6 +240,9 @@ class ControlServer:
             self.listener.close()
             self.path.unlink(missing_ok=True)
             self.listener = None
+        for end in (self.wake, self._waker):
+            if end is not None:
+                end.close()
 
 
 def request(command, path=None, *, args=None):

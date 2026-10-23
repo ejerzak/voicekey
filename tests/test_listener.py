@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import socket
 import time
 import unittest
 from unittest.mock import ANY, Mock, patch
@@ -89,6 +90,32 @@ class DispatchTests(unittest.TestCase):
             _event(ecodes.KEY_LEFTSHIFT, 1), _event(ecodes.KEY_A, 1),
         ])
         on_activity.assert_called_once()
+
+
+class WakeTests(unittest.TestCase):
+    def test_a_wake_ticks_at_once_instead_of_after_the_select_timeout(self):
+        wake, waker = socket.socketpair()
+        quiet, _keyboard = socket.socketpair()  # a device nobody types on
+        for end in (wake, waker, quiet, _keyboard):
+            self.addCleanup(end.close)
+        wake.setblocking(False)
+
+        class Ticked(Exception):
+            pass
+
+        def on_tick():
+            raise Ticked
+
+        listener = KeyboardListener({ecodes.KEY_F9}, Mock(), Mock(), on_tick, Mock(), wake=wake)
+        listener.devices["quiet"] = quiet
+        listener._rescan = lambda: None
+        waker.send(b"\0")
+        start = time.monotonic()
+        with self.assertRaises(Ticked):
+            listener.run()
+        self.assertLess(time.monotonic() - start, 0.5, "the select timeout is 1 s")
+        with self.assertRaises(BlockingIOError):
+            wake.recv(1)  # drained, so the next select sleeps again
 
 
 class ReadTests(unittest.TestCase):
