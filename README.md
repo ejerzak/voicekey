@@ -42,7 +42,10 @@ DMS Settings → Bar widgets. Keep the checkout, and rerun `./install.sh`
 after upgrading.
 
 **Default hotkeys:** Right Win (`KEY_RIGHTMETA`) for dictation, Right Alt + Right Win for the agent.
-For the agent chord, hold Right Alt before pressing Right Win: a tap raises the Hermes terminal, a hold also dictates into it (you press Enter).
+For the agent chord, hold Right Alt before pressing Right Win: a tap raises the selected agent terminal, a hold also dictates into it (you press Enter).
+Choose named agents in the DMS widget; the choice is remembered on this machine.
+Each profile has its own command, working directory and tmux session, locally or
+over SSH. See [agent profiles](docs/reference.md#agent-key-optional).
 Change `dictate_key` / `agent_key` in the config; keys can include modifier chords.
 Reserve your chosen keys in Niri so apps ignore them (defaults below):
 

@@ -13,6 +13,8 @@ def main() -> int:
     from .control import CAPTURE_COMMANDS, COMMANDS
     parser.add_argument("--control", choices=[c for c in COMMANDS if c not in CAPTURE_COMMANDS],
                         help="query or control the running daemon")
+    parser.add_argument("--agent-profile", metavar="ID",
+                        help="profile for --control agent-select or agent-tap")
     parser.add_argument("--config", help="config path (default ~/.config/voicekey/config.toml)")
     parser.add_argument("--check", action="store_true",
                         help="load config, models and the input method; list keyboards; exit")
@@ -34,6 +36,10 @@ def main() -> int:
     parser.add_argument("--preview", action="store_true",
                         help='with --capture-to-stdout: print live transcripts on stderr as Preview; "<json string>"')
     args = parser.parse_args()
+    if args.agent_profile is not None and args.control not in ("agent-select", "agent-tap"):
+        parser.error("--agent-profile requires --control agent-select or agent-tap")
+    if args.control == "agent-select" and not args.agent_profile:
+        parser.error("--control agent-select requires --agent-profile")
     if args.control:
         if any((args.check, args.download, args.replay, args.agent, args.persistent,
                 args.last, args.copy_last, args.explain_last, args.capture_to_stdout,
@@ -42,7 +48,7 @@ def main() -> int:
         import json
         from .control import request
         try:
-            result = request(args.control)
+            result = request(args.control, args={"profile": args.agent_profile}) if args.agent_profile is not None else request(args.control)
         except (OSError, ValueError) as exc:
             print(f"Voicekey control unavailable: {exc}", file=sys.stderr)
             return 1
@@ -158,10 +164,14 @@ def check(cfg) -> int:
               f"agent={cfg.agent_toggle_key or '(none)'}")
     if cfg.persistent.key:
         print(f"persistent key: {cfg.persistent.key}; silence shutoff: {cfg.persistent.silence_seconds:g}s")
-    print(f"agent: hermes transport={cfg.agent.transport} "
-          f"tmux session={cfg.agent.tmux_session} cwd={cfg.agent.working_directory}")
-    if cfg.agent.transport == "ssh-over-tailscale":
-        print(f"agent remote: {cfg.agent.remote_user}@{cfg.agent.remote_host}")
+    profiles = cfg.agent_profiles or {cfg.agent.profile_id: cfg.agent}
+    for profile_id, profile in profiles.items():
+        print(f"agent profile: {profile_id} ({profile.name}) transport={profile.transport} "
+              f"command={profile.command!r} tmux session={profile.tmux_session} "
+              f"cwd={profile.working_directory}"
+              + (" [default]" if profile_id == cfg.agent_default_profile else ""))
+        if profile.transport == "ssh-over-tailscale":
+            print(f"agent remote [{profile_id}]: {profile.remote_user}@{profile.remote_host}")
 
     required = {"notify-send", "pw-record", "wl-copy"}
     if cfg.dictation.inject == "wtype":
@@ -177,34 +187,41 @@ def check(cfg) -> int:
         print("WARNING: no niri, sway or Hyprland detected: the focused window cannot be "
               "verified, so dictations will be copied, not typed — set "
               "dictation.require_same_window = false", file=sys.stderr)
-    agent_required = {"systemd-run"}
-    if cfg.agent.transport == "ssh-over-tailscale":
-        agent_required.update({"ssh", "tailscale"})
-    else:
-        agent_required.update({"hermes", "tmux"})
-    if cfg.agent.open_terminal:
-        agent_required.add(cfg.agent.terminal)
     if compositor != "niri":
         print("WARNING: the agent key needs niri to find the agent's window", file=sys.stderr)
     missing = sorted(command for command in required if shutil.which(command) is None)
-    agent_missing = sorted(command for command in agent_required if shutil.which(command) is None)
     for command in sorted(required - set(missing)):
         print(f"command: {command}: OK")
-    for command in sorted(agent_required - set(agent_missing)):
-        print(f"agent command: {command}: OK")
     if missing:
         print(f"missing command(s): {', '.join(missing)}", file=sys.stderr)
-    if agent_missing:
-        print("WARNING: agent target unavailable; missing command(s): "
-              f"{', '.join(agent_missing)}", file=sys.stderr)
-    agent_error = None
-    if not agent_missing:
-        from .agent import check_target
-        agent_error = check_target(cfg.agent)
-        if agent_error:
-            print("WARNING: agent target unavailable: " + agent_error, file=sys.stderr)
-        elif cfg.agent.transport == "ssh-over-tailscale":
-            print("agent remote target: OK")
+    from .agent import AgentError, _require, check_target
+    agent_error = False
+    for profile_id, profile in profiles.items():
+        local_required = {"systemd-run"}
+        if profile.transport == "ssh-over-tailscale":
+            local_required.update({"ssh", "tailscale"})
+        else:
+            local_required.update({"tmux", profile.command[0]})
+        if profile.open_terminal:
+            local_required.add(profile.terminal)
+        profile_missing = []
+        for command in sorted(local_required):
+            try:
+                resolved = _require(command)
+                print(f"agent command [{profile_id}]: {resolved}: OK")
+            except AgentError:
+                profile_missing.append(command)
+        if profile_missing:
+            agent_error = True
+            print(f"WARNING: agent profile {profile_id!r} unavailable; missing command(s): "
+                  + ", ".join(profile_missing), file=sys.stderr)
+            continue
+        error = check_target(profile)
+        if error:
+            agent_error = True
+            print(f"WARNING: agent profile {profile_id!r} unavailable: {error}", file=sys.stderr)
+        else:
+            print(f"agent target [{profile_id}]: OK")
 
     key_devices, denied = [], 0
     for path in sorted(all_event_devices()):
@@ -275,7 +292,7 @@ def check(cfg) -> int:
         return 1
     if not key_devices:
         return 2
-    return 3 if agent_missing or agent_error else 0
+    return 3 if agent_error else 0
 
 
 if __name__ == "__main__":

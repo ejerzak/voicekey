@@ -114,6 +114,41 @@ ShellRoot {
             status(socket, {agent_title: "Agent"});
             agent.activate();
             check("a reload hooks again", taps(socket) === 1);
+            const profiles = [
+                {id: "hermes", name: "Hermes", app_id: "dev.voicekey.Agent", terminal_title: "Voicekey Hermes"},
+                {id: "codex-mail", name: "Codex mail", app_id: "dev.voicekey.Agent", terminal_title: "Voicekey Codex mail"}
+            ];
+            C.sortedToplevels = [C.snapshot(30, "Voicekey Hermes", "dev.voicekey.Agent"),
+                                 C.snapshot(31, "Voicekey Codex mail", "dev.voicekey.Agent"),
+                                 C.snapshot(32, "Voicekey Codex mail", "com.mitchellh.ghostty")];
+            status(socket, {capabilities: ["agent-tap", "agent-profiles"],
+                            agent_profiles: profiles, agent_profile: "hermes"});
+            check("all configured profiles are hooked regardless of selection", p.wrapped.length === 2
+                  && C.sortedToplevels[2].activate.hooks === undefined);
+            C.sortedToplevels[1].activate();
+            check("clicking an inactive profile routes that profile explicitly",
+                  socket.sent[socket.sent.length - 1].args.profile === "codex-mail");
+            const inactiveMenu = C.sortedToplevels[0];
+            status(socket, {capabilities: ["agent-tap", "agent-profiles"],
+                            agent_profiles: profiles, agent_profile: "codex-mail"});
+            inactiveMenu.activate();
+            check("a kept menu routes its profile after selection changes",
+                  socket.sent[socket.sent.length - 1].args.profile === "hermes");
+            status(socket, {capabilities: ["agent-tap", "agent-profiles"],
+                            agent_profiles: profiles.slice(1), agent_profile: "codex-mail"});
+            const beforeRemoved = taps(socket);
+            inactiveMenu.activate();
+            check("a removed profile's kept menu falls back to normal focus", taps(socket) === beforeRemoved
+                  && C.focused[C.focused.length - 1] === 30);
+
+            const renamedProfiles = [Object.assign({}, profiles[1], {id: "mail"})];
+            status(socket, {capabilities: ["agent-tap", "agent-profiles"],
+                            agent_profiles: renamedProfiles, agent_profile: "mail"});
+            C.sortedToplevels[1].activate();
+            check("a changed profile ID rehooks its existing window without nesting callbacks",
+                  socket.sent[socket.sent.length - 1].args.profile === "mail"
+                  && C.sortedToplevels[1].activate.original.hooks === undefined);
+
             console.warn("DONE failures=" + failures);
             Qt.quit();
         });

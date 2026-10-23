@@ -1,8 +1,8 @@
-"""Start, open and raise the persistent Hermes terminal.
+"""Start, open and raise persistent terminal agents.
 
-Hermes runs in a dedicated tmux server supervised by a transient systemd user
-unit.  Ghostty is only a client: closing its window detaches from tmux without
-stopping Hermes.  Voicekey never types prompts through tmux: an agent capture
+Each agent runs in a dedicated tmux server supervised by a transient systemd
+user unit. Ghostty is only a client: closing its window detaches from tmux
+without stopping the agent.  Voicekey never types prompts through tmux: an agent capture
 raises this terminal and dictates into it like any other window, and the user
 presses Enter.
 """
@@ -25,9 +25,8 @@ from .config import AgentConfig
 log = logging.getLogger("voicekey.agent")
 
 _POLL_SECONDS = 0.2
-# The terminal's Wayland app ID, which niri window rules match, and the name of
-# the desktop entry install.sh writes: Hermes is its own app in docks, so
-# it can be pinned apart from other Ghostty windows.
+# Legacy app ID retained for existing configurations and desktop pins.
+# Explicit profiles normally use dev.voicekey.Agent; cfg.app_id is authoritative.
 TERMINAL_APP_ID = "dev.voicekey.Hermes"
 _operation = contextvars.ContextVar("voicekey_agent_operation", default=(float("inf"), None))
 
@@ -36,13 +35,25 @@ class AgentError(Exception):
     pass
 
 
+def _command_path() -> str:
+    """Include conventional user tools when systemd supplies a minimal PATH."""
+    inherited = os.environ.get("PATH", os.defpath).split(os.pathsep)
+    extra = [os.path.expanduser(path) for path in (
+        "~/.local/bin", "~/.npm-global/bin",
+    )]
+    return os.pathsep.join(dict.fromkeys([*inherited, *extra]))
+
+
 def _require(command: str) -> str:
-    path = shutil.which(command)
+    command = os.path.expanduser(command)
+    if "/" in command:
+        command = os.path.abspath(command)
+    path = shutil.which(command, path=_command_path())
     if path is None:
         raise AgentError(
-            f"{command} not found — install it and rerun install step 07-voicekey"
+            f"{command} not found — install it or configure an executable path"
         )
-    return path
+    return os.path.abspath(path)
 
 
 def _run(
@@ -64,6 +75,7 @@ def _run(
             capture_output=True,
             text=True,
             timeout=timeout,
+            env={**os.environ, "PATH": _command_path()},
         )
     except subprocess.TimeoutExpired:
         raise AgentError(f"command timed out after {timeout:.0f}s: {argv[0]}")
@@ -158,7 +170,8 @@ def _remote_executable(cfg: AgentConfig, command: str) -> str:
     """Resolve a remote user-installed command through its login environment."""
     result = _remote_run(
         cfg,
-        ["sh", "-lc", 'command -v "$1"', "voicekey", command],
+        ["sh", "-lc", 'case "$1" in "~/"*) set -- "$HOME/${1#??}";; esac; '
+         'command -v "$1"', "voicekey", command],
         check=False,
     )
     path = result.stdout.strip().splitlines()
@@ -172,19 +185,25 @@ def _remote_executable(cfg: AgentConfig, command: str) -> str:
 
 
 def check_target(cfg: AgentConfig) -> str | None:
-    """Check that a remote Hermes host is reachable and equipped."""
-    if not _remote(cfg):
-        return None
+    """Check the actual configured executable and its local/remote support tools."""
     try:
+        if not _remote(cfg):
+            _require("systemd-run")
+            if cfg.open_terminal:
+                _require(cfg.terminal)
+            _require("tmux")
+            _require(cfg.command[0])
+            return None
         result = _remote_run(
             cfg,
             [
-                "sh",
-                "-lc",
-                "for cmd in tmux systemd-run hermes; do "
+                "sh", "-lc",
+                'for cmd in "$@"; do '
+                'case "$cmd" in "~/"*) cmd="$HOME/${cmd#??}";; esac; '
                 'command -v "$cmd" >/dev/null || { '
                 'printf "missing remote command: %s\\n" "$cmd" >&2; '
-                "exit 127; }; done",
+                'exit 127; }; done',
+                "voicekey", "tmux", "systemd-run", cfg.command[0],
             ],
             check=False,
         )
@@ -229,7 +248,8 @@ def _start_server(cfg: AgentConfig) -> None:
             "--quiet",
             "--collect",
             f"--unit={unit}",
-            "--description=Voicekey persistent Hermes tmux server",
+            f"--description=Voicekey {cfg.name} tmux server",
+            *([] if _remote(cfg) else [f"--setenv=PATH={_command_path()}"]),
             "--property=Restart=always",
             "--property=RestartSec=2s",
             "--",
@@ -251,7 +271,7 @@ def _start_server(cfg: AgentConfig) -> None:
         if _server_running(cfg):
             return
         time.sleep(_POLL_SECONDS)
-    raise AgentError("the dedicated Hermes tmux server did not become ready")
+    raise AgentError(f"profile {cfg.profile_id}: tmux server did not become ready")
 
 
 def _ensure_server(cfg: AgentConfig) -> None:
@@ -274,7 +294,7 @@ def _remote_workspace(cfg: AgentConfig) -> str:
     if result.returncode != 0 or not path.startswith("/"):
         detail = (result.stderr or result.stdout).strip()[-500:]
         raise AgentError(
-            f"cannot create remote Hermes working directory {cfg.working_directory}: "
+            f"profile {cfg.profile_id}: cannot create remote working directory {cfg.working_directory}: "
             f"{detail or 'no output'}"
         )
     return path
@@ -287,9 +307,9 @@ def _workspace(cfg: AgentConfig) -> str:
     try:
         path.mkdir(mode=0o700, parents=True, exist_ok=True)
     except OSError as exc:
-        raise AgentError(f"cannot create Hermes working directory {path}: {exc}")
+        raise AgentError(f"profile {cfg.profile_id}: cannot create working directory {path}: {exc}")
     if not path.is_dir():
-        raise AgentError(f"Hermes working directory is not a directory: {path}")
+        raise AgentError(f"profile {cfg.profile_id}: working directory is not a directory: {path}")
     return str(path)
 
 
@@ -302,18 +322,18 @@ def _session_target(cfg: AgentConfig) -> str:
 
 
 def _ensure_session(cfg: AgentConfig) -> bool:
-    """Ensure Hermes is running; return True when a new session was created."""
+    """Ensure the configured agent is running; return whether it was created."""
     _ensure_server(cfg)
     target = _session_target(cfg)
     exists = _tmux(cfg, "has-session", "-t", target, check=False)
     created = exists.returncode != 0
     if created:
-        hermes = (
-            _remote_executable(cfg, "hermes")
+        executable = (
+            _remote_executable(cfg, cfg.command[0])
             if _remote(cfg)
-            else _require("hermes")
+            else _require(cfg.command[0])
         )
-        command = shlex.join([hermes, "--tui"])
+        command = shlex.join([executable, *cfg.command[1:]])
         _tmux(
             cfg,
             "new-session",
@@ -324,10 +344,10 @@ def _ensure_session(cfg: AgentConfig) -> bool:
             _workspace(cfg),
             command,
         )
-        log.info("started persistent Hermes session %s", cfg.tmux_session)
+        log.info("started agent profile %s session %s", cfg.profile_id, cfg.tmux_session)
 
     # Ignore user tmux defaults that would destroy the session on detach, and
-    # leave the full terminal to Hermes rather than displaying a tmux status bar.
+    # leave the full terminal to the agent rather than displaying a tmux status bar.
     _tmux(cfg, "set-option", "-t", target, "destroy-unattached", "off")
     _tmux(cfg, "set-option", "-t", target, "remain-on-exit", "off")
     _tmux(cfg, "set-option", "-g", "status", "off")
@@ -335,7 +355,7 @@ def _ensure_session(cfg: AgentConfig) -> bool:
 
 
 def _ensure_terminal(cfg: AgentConfig) -> bool:
-    """Open one local Ghostty attached to the configured Hermes session."""
+    """Open one local Ghostty attached to the configured agent session."""
     target = _session_target(cfg)
     if not cfg.open_terminal:
         return False  # nothing to open, so nothing to ask the compositor
@@ -390,12 +410,12 @@ def _ensure_terminal(cfg: AgentConfig) -> bool:
             "--user",
             "--quiet",
             "--collect",
-            "--description=Voicekey Hermes terminal",
+            f"--description=Voicekey {cfg.name} terminal",
             *environment,
             "--",
             terminal,
             f"--title={cfg.terminal_title}",
-            f"--class={TERMINAL_APP_ID}",
+            f"--class={cfg.app_id}",
             "--gtk-single-instance=false",
             "-e",
             *attach_command,
@@ -408,10 +428,10 @@ def _ensure_terminal(cfg: AgentConfig) -> bool:
         client_attached = _client_count(cfg) > baseline_clients
         window_open = not _remote(cfg) or _terminal_window_open(cfg)
         if client_attached and window_open:
-            log.info("opened terminal for Hermes session %s", cfg.tmux_session)
+            log.info("opened terminal for agent profile %s", cfg.profile_id)
             return True
         time.sleep(_POLL_SECONDS)
-    raise AgentError("Ghostty opened but did not attach to the Hermes tmux session")
+    raise AgentError(f"profile {cfg.profile_id}: Ghostty opened but did not attach to tmux")
 
 
 def _terminal_window_open(cfg: AgentConfig) -> bool:
@@ -454,7 +474,7 @@ def _terminal_window(cfg: AgentConfig) -> dict | None:
         (
             window
             for window in _niri_list(cfg, "windows")
-            if window.get("app_id") == TERMINAL_APP_ID
+            if window.get("app_id") == cfg.app_id
             and window.get("title") == cfg.terminal_title
             and isinstance(window.get("id"), int)
         ),
@@ -516,7 +536,7 @@ def _session_has_client(cfg: AgentConfig) -> bool:
 
 
 def raise_terminal(cfg: AgentConfig, *, deadline: float) -> int | None:
-    """Raise an open Hermes terminal at once, setting nothing up; return its
+    """Raise an open agent terminal at once, setting nothing up; return its
     niri window id, or None when no terminal is open."""
     token = _operation.set((deadline, None))
     try:
@@ -537,7 +557,7 @@ def park_terminal(cfg: AgentConfig, window: int, *, deadline: float) -> None:
 
 
 def show(cfg: AgentConfig, *, cancelled=None, deadline: float) -> int | None:
-    """Bring Hermes's terminal forward, starting the session and terminal
+    """Bring the profile's terminal forward, starting the session and terminal
     first if needed, and return its niri window id. An open terminal is
     raised at once: its attached client proves the session is alive, so the
     slow (possibly remote) checks are skipped."""

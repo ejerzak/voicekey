@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 
 from voicekey.capture import Session
-from voicekey.config import Config
+from voicekey.config import AgentConfig, Config
 from voicekey.pipeline import Pipeline
 from voicekey.recorder import RecordingError
 from voicekey.recovery import Journal
@@ -149,6 +149,77 @@ class PipelineTests(unittest.TestCase):
         self.done()
         self.assertEqual(session.target.calls[0][0], '<dictation>Hermes</dictation>')
 
+    def test_agent_job_keeps_captured_profile_hook_after_default_changes(self):
+        entered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        def transcribe(samples):
+            entered.set()
+            release.wait(2)
+            return 'hello'
+        self.backend.transcribe.side_effect = transcribe
+        original = AgentConfig(post_transcription_hook="sed 's/^/Hermes: /'")
+        session = self.submit(action='agent', agent_profile=original)
+        self.assertTrue(entered.wait(1))
+        self.cfg.agent = AgentConfig(profile_id='codex', post_transcription_hook="printf WRONG")
+        release.set()
+        self.done()
+        self.assertEqual(session.target.calls[0][0], 'Hermes: hello')
+
+    def test_delayed_agent_open_keeps_profile_snapshot(self):
+        original = AgentConfig(terminal_title='Original terminal', command=['original'])
+        entered, release, completed = threading.Event(), threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        seen = []
+        def show(profile, **kwargs):
+            entered.set()
+            release.wait(2)
+            seen.append((profile.profile_id, profile.terminal_title, list(profile.command)))
+            return 7
+        replies = []
+        def ready(window, error):
+            replies.append((window, error))
+            completed.set()
+        with patch('voicekey.pipeline.agent.show', side_effect=show):
+            self.pipeline.open_agent(on_ready=ready, profile=original)
+            self.assertTrue(entered.wait(1))
+            original.terminal_title = 'Changed terminal'
+            original.command.append('changed')
+            self.cfg.agent = AgentConfig(profile_id='codex')
+            release.set()
+            self.assertTrue(completed.wait(1))
+        self.assertEqual(seen, [('hermes', 'Original terminal', ['original'])])
+        self.assertEqual(replies, [(7, '')])
+
+    def test_stalled_remote_agent_does_not_block_other_profile_open_focus_or_park(self):
+        remote = AgentConfig(profile_id='remote', transport='ssh-over-tailscale')
+        local = AgentConfig(profile_id='codex', terminal_title='Local Codex')
+        entered, release, remote_done, local_done = (threading.Event() for _ in range(4))
+        self.addCleanup(release.set)
+        replies = []
+        def show(profile, **kwargs):
+            if profile.profile_id == 'remote':
+                entered.set()
+                release.wait(2)
+                return 17
+            return 27
+        with patch('voicekey.pipeline.agent.show', side_effect=show) as opened, \
+                patch('voicekey.pipeline.agent.raise_terminal', return_value=27) as raised, \
+                patch('voicekey.pipeline.agent.park_terminal') as parked:
+            self.pipeline.open_agent(on_ready=lambda *args: remote_done.set(), profile=remote)
+            self.assertTrue(entered.wait(1))
+            self.assertIsNone(self.pipeline.focus_agent(remote))
+            self.pipeline.open_agent(on_ready=lambda *args: (replies.append(args), local_done.set()), profile=local)
+            self.assertTrue(local_done.wait(1), 'local opening waited for the remote profile')
+            self.assertFalse(remote_done.is_set())
+            self.assertEqual(self.pipeline.focus_agent(local), 27)
+            self.pipeline.park_agent(27, local)
+            self.assertEqual(raised.call_args.args[0], local)
+            self.assertEqual(parked.call_args.args, (local, 27))
+            release.set()
+            self.assertTrue(remote_done.wait(1))
+        self.assertEqual(replies, [(27, '')])
+        self.assertCountEqual([call.args[0].profile_id for call in opened.call_args_list], ['remote', 'codex'])
+
     def test_agent_capture_bypasses_polish_and_lands_in_its_target(self):
         self.cfg.polish.min_words = 0
         self.cfg.polish.app_styles = {'fake': 'formal'}
@@ -207,10 +278,11 @@ class PipelineTests(unittest.TestCase):
         self.pipeline.start()
         self.addCleanup(self.pipeline.close)
 
-    def submit(self, target=None, *, live='live fallback', age=0, action='dictate', recorder=None):
+    def submit(self, target=None, *, live='live fallback', age=0, action='dictate', recorder=None, agent_profile=None):
         identity = self.pipeline.admit()
         self.assertIsNotNone(identity)
         session = Session(action, 'hold', frozenset(), 'fake', identity=identity)
+        session.agent_profile = agent_profile
         if target is not None:
             session.target = target
         else:

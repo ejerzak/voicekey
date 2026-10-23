@@ -62,12 +62,12 @@ PluginComponent {
         : status.state === "finishing" ? "hourglass_top"
         : status.state === "paused" ? "mic_off" : "mic_none"
 
-    function send(command) {
+    function send(command, args) {
         if (!control.linkUp || controlsBusy) return;
         requestPending = true;
         controlError = "";
         requestId++;
-        control.send({command: command, id: requestId});
+        control.send({command: command, id: requestId, args: args || {}});
         requestTimeout.restart();
     }
 
@@ -318,6 +318,38 @@ PluginComponent {
                     wrapMode: Text.Wrap
                     font.pixelSize: Theme.fontSizeSmall
                     color: Theme.surfaceVariantText
+                }
+                Column {
+                    objectName: "agentProfiles"
+                    width: parent.width
+                    spacing: Theme.spacingS
+                    visible: root.online && (root.status.capabilities || []).includes("agent-profiles")
+                    StyledText {
+                        width: parent.width
+                        text: "Agent"
+                        font.pixelSize: Theme.fontSizeSmall
+                        color: Theme.surfaceVariantText
+                    }
+                    Repeater {
+                        model: root.status.agent_profiles || []
+                        delegate: DButton {
+                            required property var modelData
+                            objectName: "agentProfile-" + modelData.id
+                            width: parent.width
+                            text: modelData.name
+                            iconName: root.status.agent_profile === modelData.id
+                                ? "radio_button_checked" : "radio_button_unchecked"
+                            enabled: !root.controlsBusy && root.status.agent_profile !== modelData.id
+                            onClicked: root.send("agent-select", {profile: modelData.id})
+                        }
+                    }
+                    StyledText {
+                        width: parent.width
+                        text: "Select the agent for future key presses. This choice is remembered on this machine."
+                        wrapMode: Text.Wrap
+                        font.pixelSize: Theme.fontSizeSmall
+                        color: Theme.surfaceVariantText
+                    }
                 }
                 DButton {
                     width: parent.width

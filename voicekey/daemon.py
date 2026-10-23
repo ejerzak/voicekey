@@ -7,6 +7,7 @@ the ledger retains its gate token throughout that transfer.
 from __future__ import annotations
 
 import gc
+from copy import deepcopy
 import glob
 import logging
 import os
@@ -16,7 +17,7 @@ import time
 
 from evdev import ecodes
 
-from . import focus
+from . import focus, agent_profiles
 from .control import CAPTURE_COMMANDS, ControlServer
 from .client_capture import ClientCapture
 from .follow import NiriFocusWatch
@@ -70,6 +71,8 @@ def fix_environment() -> None:
 class Daemon:
     def __init__(self, cfg: Config, *, recorder_factory=Recorder, journal=None):
         self.cfg = cfg
+        self.agent_profiles = cfg.agent_profiles or {cfg.agent.profile_id: cfg.agent}
+        self.agent_profile = agent_profiles.load_selection(self.agent_profiles, cfg.agent_default_profile)
         self.actions = {_key_chord(cfg.dictate_key): ("persistent", TAP_HOLD),
                         _key_chord(cfg.agent_key): ("agent", TAP_HOLD)}
         for chord, action in ((cfg.dictate_toggle_key, "persistent"), (cfg.agent_toggle_key, "agent")):
@@ -112,6 +115,10 @@ class Daemon:
         self._model_lock = threading.Lock()
         self._unload_requested = False
         self.model_error = ""
+
+    @property
+    def active_agent(self):
+        return self.agent_profiles[self.agent_profile]
 
     def load(self) -> None:
         """Load both models and register as the input method; each failure
@@ -319,9 +326,10 @@ class Daemon:
         else:
             # An agent replay goes to the agent window, like the agent key.
             agent_window = None
-            if action == "agent" and (agent_window := self._raise_agent()) is None:
+            profile = deepcopy(self.active_agent) if action == "agent" else None
+            if action == "agent" and (agent_window := self._raise_agent(profile)) is None:
                 return
-            self._start("replay", frozenset(), HOLD, action, "replaying", agent_window=agent_window)
+            self._start("replay", frozenset(), HOLD, action, "replaying", agent_window=agent_window, agent_profile=profile)
         while self.session is not None or self.persistent is not None:
             self._on_tick()
             time.sleep(0.02)
@@ -404,14 +412,15 @@ class Daemon:
             owner = self.persistent
         else:
             agent_window = None
+            profile = deepcopy(self.active_agent) if action == "agent" else None
             if action == "agent":
-                agent_window, parkable = self._press_agent()
+                agent_window, parkable = self._press_agent(profile)
                 if agent_window is None:
                     return
             self._start(device, chord, behavior, action,
                         "release to insert; tap only raises the agent" if behavior == TAP_HOLD else
                         "press again to stop" if behavior == TOGGLE else "release to stop",
-                        agent_window=agent_window)
+                        agent_window=agent_window, agent_profile=profile)
             owner = self.session
         if behavior == TAP_HOLD and owner is not None:
             self._gesture = (owner, started)
@@ -429,24 +438,25 @@ class Daemon:
         elif owner is self.session:
             self._finish(discard=tap)
             if tap and park is not None:
-                self.pipeline.park_agent(park)
+                self.pipeline.park_agent(park, profile=owner.agent_profile)
 
-    def _press_agent(self):
+    def _press_agent(self, profile=None):
         """Raise the agent as an agent-key press does: (window, parkable).
         WINDOW is as from _raise_agent; PARKABLE is that window when it
         already had focus under agent.park_workspace, so a tap parks it."""
-        before = (focus.window_id() if self.cfg.agent.park_workspace
+        profile = profile or self.active_agent
+        before = (focus.window_id() if profile.park_workspace
                   and focus.compositor() == "niri" else None)
-        window = self._raise_agent()
+        window = self._raise_agent(profile)
         return window, (window if before is not None and before == window else None)
 
-    def _raise_agent(self):
+    def _raise_agent(self, profile=None):
         """Raise the agent for a capture: its window id, AGENT_OPENING while
         one opens, or None (after saying why) without niri."""
         if focus.compositor() != "niri":
             notify("voicekey: agent unavailable", "the agent key needs niri to find the agent's window", error=True)
             return None
-        return self.pipeline.focus_agent() or AGENT_OPENING
+        return self.pipeline.focus_agent(profile=profile or self.active_agent) or AGENT_OPENING
 
     def _bind_agent(self, window):
         """Bind a capture to the agent window just raised; its input field
@@ -460,7 +470,7 @@ class Daemon:
                                  "The agent window lost focus while binding")
         return target
 
-    def _open_agent_for(self, pending):
+    def _open_agent_for(self, pending, profile):
         """Keep recording while the agent opens, then bind the capture to it."""
         def ready(window, error):
             if pending.cancelled.is_set():
@@ -477,7 +487,7 @@ class Daemon:
             else:
                 target.prefix = owed(target.before(0.0), self.pipeline.spacing.prefix(target.window_id))
             pending.attach(target)
-        self.pipeline.open_agent(on_ready=ready)
+        self.pipeline.open_agent(on_ready=ready, profile=profile)
 
     def _retire_persistent(self):
         self._pause_reason = self.persistent.reason if self.persistent.paused else ""
@@ -528,7 +538,7 @@ class Daemon:
             self._settle_gate()
             notify("voicekey: persistent capture failed", str(exc), error=True)
 
-    def _start(self, device, chord, behavior, action, instruction, *, agent_window=None):
+    def _start(self, device, chord, behavior, action, instruction, *, agent_window=None, agent_profile=None):
         try:
             self._ensure_models()
         except ValueError as exc:
@@ -539,6 +549,7 @@ class Daemon:
             notify("voicekey: busy", "recording did not start; pending work or recovery storage is full", attention=True, ms=3000)
             return
         session = Session(action, behavior, chord, device, identity=identity, on_text=self.pipeline.ledger.live)
+        session.agent_profile = deepcopy(agent_profile or self.active_agent) if action == "agent" else None
         session.target = ClipboardTarget(NotifyPreview(action), Window(None, True), None)
         self.session = session
         self._settle_gate()
@@ -559,7 +570,7 @@ class Daemon:
                 session.processing_seconds = AGENT_OPEN_SECONDS + self.cfg.dictation.max_delay_seconds
                 notify("Opening the agent", "keep holding to dictate; the text goes in once it is up",
                        ms=5000, channel="agent")
-                self._open_agent_for(session.target)
+                self._open_agent_for(session.target, session.agent_profile)
             elif agent_window is not None:
                 session.target = self._bind_agent(agent_window)
             else:
@@ -646,7 +657,11 @@ class Daemon:
                 "tracking_notice": persistent.tracking_notice if persistent is not None else "",
                 "allow_typing": persistent.allow_typing if persistent is not None else False,
                 "can_follow": focus.compositor() == "niri",
-                "agent_title": self.cfg.agent.terminal_title,
+                "agent_title": self.active_agent.terminal_title,
+                "agent_profile": self.agent_profile,
+                "agent_profiles": [{"id": key, "name": profile.name, "app_id": profile.app_id,
+                                    "terminal_title": profile.terminal_title, "transport": profile.transport}
+                                   for key, profile in self.agent_profiles.items()],
                 "destination": destination.describe() if destination is not None else "",
                 "destination_name": getattr(destination, "application_name", "") if destination is not None else "",
                 "model": self.cfg.backend.type,
@@ -696,7 +711,21 @@ class Daemon:
             else:
                 capture.finish()
             return
-        if args:
+        profile = None
+        if command == "agent-select" or command == "agent-tap" and args:
+            if set(args) != {"profile"} or not isinstance(args["profile"], str):
+                raise ValueError("profile is required")
+            if args["profile"] not in self.agent_profiles:
+                raise ValueError("Unknown agent profile: " + args["profile"])
+            profile = deepcopy(self.agent_profiles[args["profile"]])
+            if command == "agent-select":
+                try:
+                    agent_profiles.save_selection(args["profile"])
+                except OSError as exc:
+                    raise ValueError(f"Could not save agent selection: {exc}") from exc
+                self.agent_profile = args["profile"]
+                return {"agent_profile": self.agent_profile}
+        elif args:
             raise ValueError("This command takes no arguments")
         if self.client_capture is not None and command not in ("stop", "free-memory"):
             raise ValueError("Client capture active: use stop to finish it before starting or changing desktop dictation")
@@ -759,14 +788,15 @@ class Daemon:
             # agent window elsewhere (the DMS Hermes plugin).
             if self.persistent is not None or self.session is not None:
                 raise ValueError("Finish the current dictation before using the agent")
-            window, parkable = self._press_agent()
+            profile = profile or deepcopy(self.active_agent)
+            window, parkable = self._press_agent(profile)
             if window is None:
                 raise ValueError("The agent needs niri to find its window")
             if window == AGENT_OPENING:
-                self.pipeline.open_agent()
+                self.pipeline.open_agent(profile=profile)
                 return {"agent": "opening"}
             if parkable is not None:
-                self.pipeline.park_agent(parkable)
+                self.pipeline.park_agent(parkable, profile=profile)
                 return {"agent": "parked"}
             return {"agent": "raised"}
         else:

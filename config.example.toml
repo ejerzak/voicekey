@@ -1,5 +1,6 @@
 # voicekey config — ~/.config/voicekey/config.toml
-# Every key is optional; these are the defaults. Keys are evdev names
+# Settings are optional; this example names the default Hermes profile.
+# Keys are evdev names
 # (KEY_RIGHTMETA, KEY_RIGHTALT+KEY_F23, ...). The compositor must not act on them —
 # see README "Install".
 
@@ -87,29 +88,42 @@ context = 2048
 
 [agent]
 post_transcription_hook = "" # separate from dictation; runs on agent prompts
-# Hermes lives in its own tmux server, independent of the editor and of
-# voicekey. Pressing the agent key raises its terminal (niri only), opening
-# one first if none is open; holding it then dictates into that terminal,
-# unpolished, and never presses Enter. Closing the terminal detaches without
-# killing Hermes or losing its conversation.
+default_profile = "hermes"  # used until this machine remembers a selection
+terminal = "ghostty"
+open_terminal = true
+# A named niri workspace holding agent terminals between uses. A press brings
+# the terminal to you; tapping while it has focus parks it. Empty: follow it.
+park_workspace = ""
+command_timeout = 10.0     # bounds each tmux, ssh or terminal step
+
+# Profiles are independent: each has its own command, cwd, transport and tmux
+# server/session. DMS selects the agent for future presses, remembered locally.
+# Commands are argv arrays, never shell strings. Prefer absolute executables:
+# the systemd user service may not have your interactive shell's PATH.
+[agent.profiles.hermes]
+name = "Hermes"
+command = ["hermes", "--tui"]
 transport = "local"
-# For a Hermes on another machine over Tailscale:
+working_directory = "~/.local/share/voicekey/hermes"
+terminal_title = "Voicekey Hermes"
+# Socket/session/window identities are generated from the profile ID by default.
+# All named profiles use app ID dev.voicekey.Agent; titles distinguish windows.
+# For Hermes on another machine over Tailscale, set:
 # transport = "ssh-over-tailscale"
 # remote_host = "desktop"
 # remote_user = "you"
 # identity_file = "~/.ssh/id_ed25519"
-tmux_socket = "voicekey-hermes"
-tmux_session = "voicekey-hermes"
-working_directory = "~/.local/share/voicekey/hermes"  # over ssh, ~/ is the remote user's home
-terminal = "ghostty"
-terminal_title = "Voicekey Hermes"
-open_terminal = true
-# A named niri workspace (declared in niri's config) holding the terminal
-# between uses: a press brings it to the focused workspace, a tap while it had
-# focus sends it back. Pair it with a niri window rule matching terminal_title
-# that opens it floating there. Empty: a press takes the view to the terminal.
-park_workspace = ""
-command_timeout = 10.0     # bounds each tmux, ssh or terminal step
+# Remote command and working_directory paths belong to the remote machine.
+
+# Another independent terminal agent (uncomment and use your executable path):
+# [agent.profiles.codex-mail]
+# name = "Codex mail"
+# command = ["/absolute/path/to/codex"]
+# working_directory = "~/mail"
+# transport = "local"
+# Voicekey targets this agent's terminal composer, not an editor/sidebar pane.
+# Existing flat [agent] configs remain supported; do not combine their
+# transport/command/working_directory/tmux settings with named profiles.
 
 [text.word_overrides]       # optional literal phrases, case-insensitive word boundaries
 # "hyper whisper" = "hyprwhspr"

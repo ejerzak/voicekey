@@ -176,7 +176,7 @@ from assigning actions to ordinary characters.
 | `[polish]` | third pass: backend, endpoint, format, style, `min_words` (8), `max_wait_seconds` (4) |
 | `[pipeline]` | pending count/audio limits, transcription and shutdown deadlines, recovery quota and history retention |
 | `[polish.server]` | `model_file` makes voicekey run `llama-server` itself, as a child process; `command` names which one |
-| `[agent]` | persistent Hermes (local or SSH via Tailscale) and its terminal |
+| `[agent]`, `[agent.profiles.ID]` | named terminal agents, commands and working directories, local or SSH via Tailscale |
 
 `install.sh` downloads the models the config names and verifies their
 SHA-256 digests.
@@ -390,59 +390,119 @@ in `benchmarks/` also load models for direct performance and memory measurements
 
 ## Agent key (optional)
 
-Press the agent key and voicekey raises the persistent Hermes terminal; hold
-it, speak and release, and the transcript is typed into Hermes's composer
-like any dictation, with a live preview, but unpolished. Voicekey never
-presses Enter: review the prompt, add to it with further holds or by typing,
-and submit it yourself. Whether Enter during a running Hermes turn interrupts,
-steers or queues is Hermes's `display.busy_input_mode`.
+Press the agent key and voicekey raises the selected agent's persistent
+terminal; hold it, speak and release, and the transcript is typed into its
+composer with a live preview, unpolished. Voicekey never presses Enter:
+review the prompt, add to it with further holds or by typing, and submit it
+yourself. The target is a terminal composer, including a terminal Codex
+session; editor sidebars and embedded agent panes are not targets.
 
 A tap (release within `tap_seconds`) only raises the terminal; its audio is
 discarded unheard. If no terminal is open, the press opens one: voicekey
-starts a dedicated tmux server in a supervised systemd user unit if needed,
-runs `hermes --tui` there in a neutral working directory and opens a Ghostty
-window attached to it. A hold keeps listening meanwhile, previewing in a
-notification; once the window is up it takes focus and the text goes in,
-even if you released first. If it never opens, the transcript is saved and
-copied. Closing the window only detaches. With `transport = "ssh-over-tailscale"`,
-recording and transcription stay local and Hermes runs on another machine
-over OpenSSH with strict host-key checking; the local Ghostty forwards typed
-text over ssh.
+starts the profile's dedicated tmux server in a supervised systemd user unit
+if needed, runs its configured command, and attaches a Ghostty window. A hold
+keeps listening meanwhile, previewing in a notification. If the terminal fails
+to open or focus moves elsewhere, nothing is typed; the transcript is saved
+and copied. Closing the terminal only detaches, preserving the process and
+conversation. Restarting Voicekey also leaves the agent session running.
 
-The agent key needs niri, which lets voicekey find and raise the terminal by
-its app ID, `dev.voicekey.Hermes`, and title (`terminal_title`). A terminal
-opened by a voicekey older than that app ID goes unrecognized: close it once
-and the next press opens a new one. The capture binds to that window as ordinary
-dictation does; if focus has moved elsewhere by then, nothing is typed and
-the transcript is saved and copied.
+Configure named profiles in `~/.config/voicekey/config.toml`:
 
-With `park_workspace`, the terminal comes to you, Guake-style, instead of the
-view going to it. It lives on that named workspace between uses; a press
-brings it to the focused workspace and focuses it, and a tap while it
-already had focus sends it back. A hold always dictates. Declare the
-workspace in niri's config and give the terminal a window rule that opens it
-floating there; voicekey brings a newly opened one over itself:
+```toml
+[agent]
+default_profile = "hermes"
+terminal = "ghostty"
+
+[agent.profiles.hermes]
+name = "Hermes"
+command = ["hermes", "--tui"]
+working_directory = "~/.local/share/voicekey/hermes"
+terminal_title = "Voicekey Hermes"
+
+[agent.profiles.codex-mail]
+name = "Codex mail"
+command = ["/absolute/path/to/codex"]
+working_directory = "~/mail"
+
+[agent.profiles.remote-hermes]
+name = "Remote Hermes"
+command = ["/home/you/.local/bin/hermes", "--tui"]
+working_directory = "~/projects"
+transport = "ssh-over-tailscale"
+remote_host = "desktop"
+remote_user = "you"
+identity_file = "~/.ssh/id_ed25519"
+```
+
+Commands are argument arrays; arguments are treated literally, without shell
+expansion. Use an absolute executable path if the command is installed outside the systemd
+user service's `PATH`; an interactive shell finding it does not establish
+that the service can. For remote profiles, command and working-directory
+paths refer to the remote machine; `identity_file` is local. Recording and
+transcription stay local. OpenSSH uses strict host-key checking, and the local
+terminal forwards typed text over SSH. If a profile is unavailable, Voicekey
+reports the failure; it never substitutes another profile or transport.
+
+The DMS widget's **Agent** choices select the profile for future key presses.
+Selection does not launch or close an agent, and existing sessions stay
+independent. A press binds its selected profile for the whole recording.
+Voicekey remembers the choice in
+`$XDG_STATE_HOME/voicekey/agent-profile.json` (normally
+`~/.local/state/voicekey/agent-profile.json`), outside the synced config.
+`default_profile` is used when no valid remembered choice exists. Restart
+the service after changing profile definitions.
+
+Each profile has its own command, working directory, transport, tmux server
+and session. By default a profile `ID` uses `voicekey-ID` for its tmux socket
+and session, `~/.local/share/voicekey/ID` as its working directory, and
+`Voicekey ID` as its terminal title. IDs contain 1–39 ASCII letters, digits,
+underscores or hyphens. Profiles can override these values; terminal window
+identities must stay distinct, and profiles on the same endpoint must use
+distinct tmux sockets. Common `[agent]` settings are `terminal`,
+`open_terminal`, `park_workspace`, `command_timeout` and
+`post_transcription_hook`; the profile's value overrides the common value.
+
+Existing flat `[agent]` configurations still run Hermes with the legacy
+`dev.voicekey.Hermes` window identity. They need no migration. To adopt named
+profiles, move transport, command, working-directory and tmux settings into
+the appropriate `[agent.profiles.ID]` table; do not mix flat target settings
+with named profiles. Named profiles default to app ID `dev.voicekey.Agent`,
+with separate titles. A profile can explicitly set `app_id` to retain an
+existing window identity during migration. The agent key needs niri to find and raise the terminal by
+its app ID and title. A terminal from the old identity must be closed once
+after migrating so the next press can open the new window.
+
+With `park_workspace`, the terminal comes to you, Guake-style. It lives on
+that named workspace between uses; a press brings it to the focused workspace
+and focuses it, and a tap while it already had focus sends it back. A hold
+always dictates. Declare the workspace in niri's config and give agent
+terminals a window rule that opens them floating there:
 
 ```kdl
-workspace "hermes"
+workspace "agents"
 
 window-rule {
-    match app-id="dev.voicekey.Hermes" title="^Voicekey Hermes$"
-    open-on-workspace "hermes"
+    match app-id="dev.voicekey.Agent"
+    open-on-workspace "agents"
     open-focused false
     open-floating true
 }
 ```
 
-With DMS, the [Hermes Sidebar](#dms-bar-widget) plugin gives
-the terminal's dock icon the same tap behavior.
+Set `[agent] park_workspace = "agents"` to match. For a legacy flat config,
+use `app-id="dev.voicekey.Hermes"` in the rule instead.
 
-`./install.sh` writes a desktop entry for that app ID,
-`~/.local/share/applications/dev.voicekey.Hermes.desktop`, and installs
-Hermes's icon from `contrib/hermes` into `~/.local/share/icons/hicolor`, so
-docks show the terminal as its own app, with Hermes's icon even when Hermes
-runs on another machine, rather than as one more Ghostty window. Pin it to give it a fixed place in the dock;
-while Hermes is closed, clicking the pin opens it.
+With DMS, the [Agent Sidebar](#dms-bar-widget) plugin gives each terminal's
+dock/window click the same tap behavior for that specific profile, even when
+another profile is selected. Such a click leaves the selection unchanged.
+
+`./install.sh` writes `dev.voicekey.Agent.desktop` and its icon under
+`~/.local/share/applications` and `~/.local/share/icons/hicolor`. Pin
+**Voicekey Agent** to launch the selected profile. All named profiles share
+that app identity; the window titles distinguish their running terminals.
+The installer retains `dev.voicekey.Hermes.desktop` and Hermes's icon for
+legacy configs and existing pins. Both launchers act like the agent key and
+use the selected profile.
 
 ## Diagnostics
 
@@ -607,14 +667,19 @@ For a permanent default, set `[persistent] destination_policy` in your Voicekey 
 Window policies do not distinguish tabs or panes inside one window; losing an
 input-method field activation also pauses dictation.
 
-A second plugin, [Hermes Sidebar](../contrib/dms/HermesSidebar), makes
-clicking the agent terminal's dock icon act like a tap of the agent key: with
+The widget also shows **Agent** choices from the daemon's configured profiles.
+The choice is remembered on this machine and applies to future key presses.
+
+A second plugin, [Agent Sidebar](../contrib/dms/HermesSidebar), makes
+clicking an agent terminal's dock icon act like a tap for that profile: with
 `park_workspace` the terminal comes to the focused workspace, and a click
 while it has focus parks it again. The bar's RunningApps and AppsDock widgets
 behave the same; the workspace switcher's window icons, and the AppsDock
 widget's window list, still go to the terminal's workspace. The plugin
-recognizes the terminal by its app ID and the daemon's `agent_title`, and sends `agent-tap`
-over the control socket. While the daemon is offline, clicks focus the
+recognizes every configured terminal by its advertised app ID and title, and
+sends `agent-tap` with that profile's ID over the control socket. Clicking an
+inactive profile operates its terminal without changing the selected profile.
+It also supports older daemons advertising only `agent_title`. While the daemon is offline, clicks focus the
 terminal as DMS normally would. Its tests run against mock DMS services in
 `tests/test_dms_plugins.py`, which needs `qs` in a Wayland session.
 
@@ -651,7 +716,9 @@ The same control interface is available in a terminal:
 ~/.local/share/voicekey/venv/bin/python -m voicekey --control start
 ~/.local/share/voicekey/venv/bin/python -m voicekey --control stop
 ~/.local/share/voicekey/venv/bin/python -m voicekey --control pause-on-switch # while idle; or: follow-focus, pin
-~/.local/share/voicekey/venv/bin/python -m voicekey --control agent-tap       # as a tap of the agent key
+~/.local/share/voicekey/venv/bin/python -m voicekey --control agent-tap       # selected profile, like the agent key
+~/.local/share/voicekey/venv/bin/python -m voicekey --control agent-select --agent-profile codex-mail
+~/.local/share/voicekey/venv/bin/python -m voicekey --control agent-tap --agent-profile hermes # selection unchanged
 ```
 
 The daemon publishes status and accepts these commands over a private Unix
@@ -683,7 +750,11 @@ rolling cleanup, and acceptance/cancellation behavior.
 empty list). `capture-client-name` permits `capture-start.args.client_name`;
 `capture-preview` permits `capture-start.args.preview`. `draft-toggle` advertises
 the idle-only `draft-on` and `draft-off` commands. `agent-tap` advertises the
-`agent-tap` command and the `agent_title` status field.
+`agent-tap` command and the `agent_title` status field. `agent-profiles`
+advertises `agent-select`, the optional `agent-tap.args.profile` argument,
+`agent_profile` (selected ID) and `agent_profiles` (configured profiles). Each
+profile contains `id`, `name`, `app_id`, `terminal_title` and `transport`;
+commands, executable paths and working directories are not exposed.
 For an active client capture, `destination_name` is that supplied label, or
 `Client` when unnamed; `destination` describes the socket client. Desktop
 captures retain their actual window destination, such as Ghostty. A client label
@@ -695,7 +766,8 @@ requests. Replies are `{"type":"reply","id":ID,"error":null,...}` on success,
 or have a human-readable `error` string on refusal. The existing commands are
 `status`, `start`, `start-typing`, `stop`, `cancel`, `draft-on`, `draft-off`,
 `pause-on-switch`, `follow-focus`, `pin`, `free-memory`
-and `agent-tap`; they take no arguments. `status` replies include current
+and `agent-tap`; with `agent-profiles`, also `agent-select`. Commands take no
+arguments except the profile arguments described below. `status` replies include current
 status fields. `start` addresses desktop dictation. `stop` finishes the active
 recording, including a client capture, and is available from any connection
 without a capture ID. A client capture's result still goes to its original owner.
@@ -714,7 +786,20 @@ terminal, raises it, or with `park_workspace` parks it when it already had
 focus. Its reply adds `agent`: `"opening"`, `"raised"` or `"parked"`. It
 refuses during dictation and without niri. Status then also carries
 `agent_title`, the configured `terminal_title`, so a client can recognize the
-agent window; the [Hermes Sidebar](#dms-bar-widget) plugin uses both.
+active agent window; the [Agent Sidebar](#dms-bar-widget) plugin uses these
+legacy fields with older daemons.
+
+With `agent-profiles`, `agent-select` takes `args: {"profile":"ID"}` and
+remembers that selection on this machine. It applies to future key presses,
+not an in-progress recording. `agent-tap` optionally takes the same `profile`
+argument to operate a specific terminal without changing the selection. With
+no argument it uses the selected profile. Unknown IDs are refused; there is
+no automatic fallback to a different agent.
+
+```json
+{"id":1,"command":"agent-select","args":{"profile":"codex-mail"}}
+{"id":2,"command":"agent-tap","args":{"profile":"hermes"}}
+```
 
 A complete capture exchange looks like this (angle brackets mark example IDs):
 

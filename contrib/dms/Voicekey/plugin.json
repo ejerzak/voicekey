@@ -1,8 +1,8 @@
 {
   "id": "voicekey",
   "name": "Voicekey",
-  "description": "Dictation status, listening controls, and destination policy",
-  "version": "0.1.0",
+  "description": "Dictation status, listening controls, destination policy, and agent profiles",
+  "version": "0.2.0",
   "author": "Voicekey contributors",
   "type": "widget",
   "capabilities": ["dankbar-widget"],

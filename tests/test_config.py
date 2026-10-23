@@ -286,3 +286,71 @@ class TapConfigTests(unittest.TestCase):
         cfg.persistent.max_utterance_seconds = cfg.pipeline.max_audio_seconds
         with self.assertRaises(ConfigError):
             _validate(cfg)
+
+class AgentProfileConfigTests(unittest.TestCase):
+    _load_text = ConfigTests._load_text
+
+    def test_legacy_config_keeps_single_hermes_identity(self):
+        cfg = self._load_text('[agent]\npark_workspace = "agents"\n')
+        self.assertEqual(cfg.agent_default_profile, "hermes")
+        self.assertIs(cfg.agent_profiles["hermes"], cfg.agent)
+        self.assertEqual(cfg.agent.command, ["hermes", "--tui"])
+        self.assertEqual(cfg.agent.app_id, "dev.voicekey.Hermes")
+        with self.assertLogs("voicekey.config", "WARNING"):
+            cfg = self._load_text('[agent]\ncommand = "retired shell command"\n')
+        self.assertEqual(cfg.agent.command, ["hermes", "--tui"])
+
+    def test_profiles_have_independent_defaults_and_selected_default(self):
+        cfg = self._load_text('''[agent]
+ default_profile = "codex"
+ park_workspace = "agents"
+ [agent.profiles.hermes]
+ name = "Remote Hermes"
+ transport = "ssh-over-tailscale"
+ remote_host = "desktop"
+ remote_user = "alice"
+ identity_file = "~/.ssh/id_ed25519"
+ [agent.profiles.codex]
+ name = "Codex"
+ command = ["~/.local/bin/codex", "--model", "example"]
+ ''')
+        self.assertIs(cfg.agent, cfg.agent_profiles["codex"])
+        self.assertEqual(cfg.agent.transport, "local")
+        self.assertEqual(cfg.agent.remote_host, "")
+        self.assertEqual(cfg.agent.remote_user, "")
+        self.assertEqual(cfg.agent.identity_file, "")
+        self.assertEqual(cfg.agent.tmux_socket, "voicekey-codex")
+        self.assertEqual(cfg.agent.tmux_session, "voicekey-codex")
+        self.assertEqual(cfg.agent.terminal_title, "Voicekey codex")
+        self.assertEqual(cfg.agent.app_id, "dev.voicekey.Agent")
+        self.assertEqual(cfg.agent.park_workspace, "agents")
+        self.assertEqual(cfg.agent_profiles["hermes"].working_directory,
+                         "~/.local/share/voicekey/hermes")
+        self.assertTrue(os.path.isabs(cfg.agent.working_directory))
+
+    def test_single_profile_can_omit_default_but_invalid_explicit_default_fails(self):
+        cfg = self._load_text('[agent.profiles.codex]\ncommand = ["codex"]')
+        self.assertEqual(cfg.agent_default_profile, "codex")
+        for default in ('"missing"', '"hermes"', '[]', '42'):
+            with self.subTest(default=default), self.assertRaisesRegex(ConfigError, 'agent.default_profile'):
+                self._load_text('[agent]\ndefault_profile = ' + default + '\n[agent.profiles.codex]\ncommand = ["codex"]')
+
+    def test_profiles_validate_each_profile_and_reject_ambiguous_inheritance(self):
+        for text, message in (
+            ('[agent]\nprofiles = {}', 'at least one'),
+            ('[agent]\nprofiles = []', 'TOML table'),
+            ('[agent]\nremote_host = "desktop"\n[agent.profiles.hermes]', 'per-profile'),
+            ('[agent.profiles."bad/id"]', 'profile ID'),
+            ('[agent.profiles.hermes]\ncommand = []', 'command'),
+            ('[agent.profiles.hermes]\ncommand = "hermes"', 'command'),
+            ('[agent.profiles.hermes]\ncommand = ["hermes", 3]', 'command'),
+            ('[agent.profiles.hermes]\ncommand = [""]', 'command'),
+            ('[agent.profiles.hermes]\ncommand = ["--bad"]', 'command'),
+            ('[agent.profiles.hermes]\ncommand = ["hermes", "\\u0000"]', 'command'),
+            ('[agent.profiles.hermes]\nprofile_id = "other"', 'match'),
+            ('[agent.profiles.hermes]\n[agent.profiles.codex]\nremote_host = "desktop"', 'agent.profiles.codex'),
+            ('[agent.profiles.hermes]\n[agent.profiles.codex]\ntmux_socket = "voicekey-hermes"', 'own tmux_socket'),
+            ('[agent.profiles.hermes]\n[agent.profiles.codex]\nterminal_title = "Voicekey hermes"', 'duplicates'),
+        ):
+            with self.subTest(text=text), self.assertRaisesRegex(ConfigError, message):
+                self._load_text(text)

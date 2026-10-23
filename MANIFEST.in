@@ -1,4 +1,4 @@
 include install.sh voicekey.service config.example.toml LICENSE
-recursive-include contrib/dms *.qml *.json
+recursive-include contrib/dms *.qml *.json *.svg
 include contrib/hermes/dev.voicekey.Hermes.png contrib/hermes/LICENSE
 recursive-include contrib/accessibility *.py *.md *.json

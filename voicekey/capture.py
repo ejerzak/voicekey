@@ -17,6 +17,7 @@ class Session:
         self.action, self.behavior, self.chord, self.device = action, behavior, chord, device
         self.target = NotifyPreview(action)
         self.text = ""
+        self.agent_profile = None
         self.decoder = None
         self._stream = None
         self._frames = queue.Queue(maxsize=OVERLOAD_FRAMES)

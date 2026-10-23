@@ -9,6 +9,7 @@ without spawning replacement threads for a hung model or application.
 from __future__ import annotations
 
 import logging
+from copy import deepcopy
 import queue
 import threading
 import time
@@ -48,6 +49,7 @@ class Job:
     failure: str = ""
     session_id: str = ""
     drop_reason: str = ""
+    agent_profile: object | None = None
 
 
 class Pipeline:
@@ -82,6 +84,8 @@ class Pipeline:
         self._stalled_corpus_audio = 0.0
         self._items_lock = threading.Lock()
         self._slots = {name: Slot(name) for name in ("transcribe", "polish", "deliver", "agent", "corpus", "hook")}
+        self._agent_slots = {cfg.agent.profile_id: self._slots["agent"]}
+        self._agent_slots_lock = threading.Lock()
         self._journal_slots = {name: Slot("journal-" + name) for name in
                                ("startup", "capture", "transcribe", "polish", "deliver", "close", "session")}
 
@@ -266,7 +270,8 @@ class Pipeline:
         if session_id:
             deadline = float("inf")  # queue age does not revoke a persistent binding
         job = Job(session.id, session.action, session.target, samples, finished_at, deadline,
-                  live=session.text, failure=failure, session_id=session_id)
+                  live=session.text, failure=failure, session_id=session_id,
+                  agent_profile=getattr(session, "agent_profile", None))
         if not self.ledger.transition(job.id, Stage.FINALIZING, Stage.TRANSCRIBING,
                                       audio_seconds=len(samples) / 16000, live=session.text, storage_bytes=TEXT_RESERVE):
             return
@@ -430,7 +435,7 @@ class Pipeline:
             value = text.override(value, self.cfg.text.word_overrides)
         except ValueError as exc:
             log.warning("word overrides skipped: %s", exc)
-        section = self.cfg.agent if job.action == "agent" else self.cfg.dictation
+        section = (job.agent_profile or self.cfg.agent) if job.action == "agent" else self.cfg.dictation
         if not section.post_transcription_hook:
             return value, value, "disabled"
         deadline = min(self._deadline(job) - 0.15, time.monotonic() + text.HOOK_SECONDS)
@@ -524,50 +529,61 @@ class Pipeline:
                 self.notify("📋 Copied, not inserted" if copied else "voicekey: transcript saved, not inserted",
                             body, error=True)
 
-    def focus_agent(self):
+    def _agent_slot(self, profile):
+        # A stalled remote profile must not block an unrelated local launch.
+        with self._agent_slots_lock:
+            if profile.profile_id not in self._agent_slots:
+                self._agent_slots[profile.profile_id] = Slot("agent-" + profile.profile_id)
+            return self._agent_slots[profile.profile_id]
+
+    def focus_agent(self, profile=None):
         """Raise an open agent terminal for an agent capture, on the key
         listener's thread and so within a short bound. Returns its window id,
         or None when no terminal is open or one is still being opened."""
+        profile = deepcopy(profile or self.cfg.agent)
         deadline = time.monotonic() + AGENT_FOCUS_SECONDS
         try:
-            return self._slots["agent"].call(lambda: agent.raise_terminal(self.cfg.agent, deadline=deadline), deadline)
+            return self._agent_slot(profile).call(lambda: agent.raise_terminal(profile, deadline=deadline), deadline)
         except WorkBusy:
             return None  # open_agent is still starting it
         except Exception as exc:
             log.warning("could not raise agent: %s", exc)
             return None
 
-    def park_agent(self, window):
+    def park_agent(self, window, profile=None):
         """Send the agent terminal WINDOW back to its parking workspace, on
         the key listener's thread and so within a short bound."""
+        profile = deepcopy(profile or self.cfg.agent)
         deadline = time.monotonic() + AGENT_FOCUS_SECONDS
         try:
-            self._slots["agent"].call(lambda: agent.park_terminal(self.cfg.agent, window, deadline=deadline), deadline)
+            self._agent_slot(profile).call(lambda: agent.park_terminal(profile, window, deadline=deadline), deadline)
         except Exception as exc:  # WorkBusy included: an open in progress keeps it
             log.warning("could not park agent: %s", exc)
 
-    def open_agent(self, on_ready=None):
-        """Start and raise the agent off the key listener's thread. It shares
-        the agent slot, so repeated presses cannot start a second session or
-        terminal. ON_READY(window, error) receives the raised window's id, or
-        None and the reason, after any open already in progress."""
+    def open_agent(self, on_ready=None, *, profile=None):
+        """Start and raise the agent off the key listener's thread. Each profile
+        has one slot, so repeated presses cannot start duplicate terminals.
+        ON_READY(window, error) receives the raised window's id, or None and
+        the reason, after any open of this profile already in progress."""
+        profile = deepcopy(profile or self.cfg.agent)
+        slot = self._agent_slot(profile)
         def run():
             deadline = min(self._stop_at, time.monotonic() + AGENT_OPEN_SECONDS)
-            open_ = lambda: agent.show(self.cfg.agent, cancelled=self._closed, deadline=deadline)
+            open_ = lambda: agent.show(profile, cancelled=self._closed, deadline=deadline)
             window, error = None, ""
             try:
                 try:
-                    window = self._slots["agent"].call(open_, deadline)
+                    window = slot.call(open_, deadline)
                 except WorkBusy:
                     if on_ready is None:
                         return  # already opening
-                    while self._slots["agent"].busy and time.monotonic() < deadline:
+                    while slot.busy and time.monotonic() < deadline:
                         time.sleep(0.05)
-                    window = self._slots["agent"].call(open_, deadline)
+                    window = slot.call(open_, deadline)
             except Exception as exc:
                 error = str(exc) or type(exc).__name__
                 log.warning("could not open agent: %s", error)
-                self.notify("voicekey: could not open agent", error, error=True)
+                self.notify("voicekey: could not open agent", f"{profile.name}: {error}. You can select another agent in Voicekey.", error=True)
             if on_ready is not None:
                 on_ready(window, error or ("" if window is not None else "the agent window did not appear"))
         threading.Thread(target=run, name="agent-open", daemon=True).start()

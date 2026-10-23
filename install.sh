@@ -16,12 +16,12 @@ UNIT="$HOME/.config/systemd/user/voicekey.service"
 PLUGINS="${XDG_CONFIG_HOME:-$HOME/.config}/dms/plugins"
 DESKTOP="${XDG_DATA_HOME:-$HOME/.local/share}/applications/dev.voicekey.Hermes.desktop"
 ICON="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/256x256/apps/dev.voicekey.Hermes.png"
+AGENT_DESKTOP="${XDG_DATA_HOME:-$HOME/.local/share}/applications/dev.voicekey.Agent.desktop"
+AGENT_ICON="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps/dev.voicekey.Agent.svg"
 
-# The agent terminal's desktop entry, named for its app ID (TERMINAL_APP_ID in
-# voicekey/agent.py): docks show Hermes as its own app, so it can be pinned,
-# and launching it is an agent-key tap. Written rather than linked because
-# Exec needs this venv's absolute path. The icon ships in contrib/hermes
-# (Hermes's own, MIT) because Hermes often runs on another machine.
+# Generic named-profile launcher plus the legacy Hermes identity. Both launch
+# the selected profile, like an agent-key tap. Keep the legacy entry/icon for
+# existing flat configurations and dock pins. Exec needs this venv's path.
 install_desktop_entry() {
     install -Dm644 "$HERE/contrib/hermes/dev.voicekey.Hermes.png" "$ICON"
     mkdir -p "$(dirname "$DESKTOP")"
@@ -35,8 +35,19 @@ Icon=dev.voicekey.Hermes
 StartupWMClass=dev.voicekey.Hermes
 Terminal=false
 EOF
-    echo "  DESKTOP: $DESKTOP"
-    echo "  ICON: $ICON"
+    install -Dm644 "$HERE/contrib/dms/Voicekey/dev.voicekey.Agent.svg" "$AGENT_ICON"
+    cat > "$AGENT_DESKTOP" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Voicekey Agent
+Comment=Open or raise the selected agent terminal
+Exec="$VENV/bin/python" -m voicekey --control agent-tap
+Icon=dev.voicekey.Agent
+StartupWMClass=dev.voicekey.Agent
+Terminal=false
+EOF
+    echo "  DESKTOP: $AGENT_DESKTOP (legacy: $DESKTOP)"
+    echo "  ICON: $AGENT_ICON (legacy: $ICON)"
 }
 
 # Link contrib/dms/NAME into DMS's plugins; refuse to replace anything else.
@@ -116,7 +127,8 @@ install_plugins() {
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
     echo "  Would create $VENV (python 3.12 via uv), install $HERE, download models,"
     echo "  link $UNIT -> $HERE/voicekey.service, enable voicekey.service and run --check,"
-    echo "  and write the Hermes terminal's desktop entry $DESKTOP and icon $ICON"
+    echo "  and write the Agent desktop entry $AGENT_DESKTOP and icon $AGENT_ICON,"
+    echo "  retaining the legacy Hermes entry $DESKTOP and icon $ICON"
     echo "  If dms is installed, link its plugins into $PLUGINS and enable them when DMS is running."
     exit 0
 fi

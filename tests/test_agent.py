@@ -60,7 +60,8 @@ class AgentTests(unittest.TestCase):
         )
         self.assertIsNone(agent.check_target(cfg))
         command = remote_run.call_args.args[1]
-        self.assertIn("tmux systemd-run hermes", command[-1])
+        self.assertEqual(command[-3:], ["tmux", "systemd-run", "hermes"])
+        self.assertIn('for cmd in "$@"', command[2])
 
     @patch(
         "voicekey.agent._remote_run",
@@ -360,3 +361,66 @@ class CancellationTests(unittest.TestCase):
             run.assert_not_called()
         finally:
             agent._operation.reset(token)
+
+class AgentProfileTests(unittest.TestCase):
+    @patch("voicekey.agent._require", return_value="/opt/bin/codex with spaces")
+    @patch("voicekey.agent._workspace", return_value="/work")
+    @patch("voicekey.agent._tmux")
+    @patch("voicekey.agent._ensure_server")
+    def test_custom_command_preserves_every_argument(self, server, tmux, workspace, require):
+        import shlex
+        tmux.side_effect = lambda _cfg, *args, **kwargs: completed(1 if args[0] == "has-session" else 0)
+        cfg = AgentConfig(profile_id="codex", command=["codex", "$(touch /tmp/no)", "a'b", "", "two words"])
+        agent._ensure_session(cfg)
+        invocation = next(c for c in tmux.call_args_list if c.args[1] == "new-session")
+        self.assertEqual(shlex.split(invocation.args[-1]),
+                         ["/opt/bin/codex with spaces", *cfg.command[1:]])
+        require.assert_called_once_with("codex")
+
+    @patch("voicekey.agent._remote_executable", return_value="/home/alice/bin/claude")
+    @patch("voicekey.agent._workspace", return_value="/work")
+    @patch("voicekey.agent._tmux")
+    @patch("voicekey.agent._ensure_server")
+    def test_remote_custom_executable_is_resolved_on_remote_host(self, server, tmux, workspace, executable):
+        tmux.side_effect = lambda _cfg, *args, **kwargs: completed(1 if args[0] == "has-session" else 0)
+        cfg = AgentConfig(transport="ssh-over-tailscale", command=["~/bin/claude", "--continue"])
+        agent._ensure_session(cfg)
+        executable.assert_called_once_with(cfg, "~/bin/claude")
+        invocation = next(c for c in tmux.call_args_list if c.args[1] == "new-session")
+        self.assertEqual(invocation.args[-1], "/home/alice/bin/claude --continue")
+
+    @patch("voicekey.agent._require", side_effect=lambda command: (_ for _ in ()).throw(agent.AgentError("codex not found")) if command == "codex" else "/usr/bin/" + command)
+    def test_local_diagnostics_check_the_actual_command(self, require):
+        self.assertEqual(agent.check_target(AgentConfig(command=["codex", "--resume"])), "codex not found")
+        self.assertIn(call("codex"), require.call_args_list)
+        self.assertNotIn(call("hermes"), require.call_args_list)
+
+    @patch("voicekey.agent._remote_run", return_value=completed())
+    def test_remote_diagnostics_pass_command_as_an_argument(self, run):
+        cfg = AgentConfig(transport="ssh-over-tailscale", command=["/opt/my agent;literal", "--continue"])
+        self.assertIsNone(agent.check_target(cfg))
+        command = run.call_args.args[1]
+        self.assertEqual(command[-1], "/opt/my agent;literal")
+        self.assertNotIn("/opt/my agent;literal", command[2])
+
+    def test_minimal_daemon_path_finds_user_tools_and_explicit_paths(self):
+        import os
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / ".local/bin/codex"
+            binary.parent.mkdir(parents=True)
+            binary.write_text("#!/bin/sh\nexit 0\n")
+            binary.chmod(0o700)
+            with patch.dict(os.environ, {"HOME": directory, "PATH": "/usr/bin"}):
+                self.assertEqual(agent._require("codex"), str(binary))
+                self.assertEqual(agent._require("~/.local/bin/codex"), str(binary))
+                self.assertEqual(agent._require(str(binary)), str(binary))
+
+    @patch("voicekey.agent._niri_list", return_value=[
+        {"id": 1, "app_id": "dev.voicekey.Agent", "title": "Voicekey hermes"},
+        {"id": 2, "app_id": "dev.voicekey.Agent", "title": "Voicekey codex"},
+    ])
+    def test_shared_agent_app_id_keeps_profile_windows_distinct(self, windows):
+        cfg = AgentConfig(profile_id="codex", app_id="dev.voicekey.Agent", terminal_title="Voicekey codex")
+        self.assertEqual(agent._terminal_window(cfg)["id"], 2)

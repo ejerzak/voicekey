@@ -1,3 +1,4 @@
+import os
 import tempfile
 import threading
 import time
@@ -7,7 +8,7 @@ from unittest.mock import Mock, patch
 
 from evdev import ecodes
 
-from voicekey.config import Config
+from voicekey.config import AgentConfig, Config
 from voicekey.daemon import Daemon
 from voicekey.gate import Gate
 from voicekey.pipeline import Pipeline
@@ -21,6 +22,9 @@ class ControllerTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+        state = patch.dict(os.environ, {'XDG_STATE_HOME': self.tmp.name})
+        state.start()
+        self.addCleanup(state.stop)
         self.cfg = Config()
         self.cfg.pipeline.shutdown_seconds = 0.4
         self.daemon = Daemon(self.cfg, recorder_factory=FakeRecorder,
@@ -164,7 +168,7 @@ class ControllerTests(unittest.TestCase):
 
     def test_agent_tap_raises_agent_and_discards_recording(self):
         self.agent_press(held=False)
-        self.daemon.pipeline.focus_agent.assert_called_once_with()
+        self.daemon.pipeline.focus_agent.assert_called_once_with(profile=self.cfg.agent)
         self.daemon.pipeline.open_agent.assert_not_called()
         self.daemon.backend.transcribe.assert_not_called()
         self.assertEqual(self.targets[0].calls, [])
@@ -180,12 +184,12 @@ class ControllerTests(unittest.TestCase):
         return self.daemon.pipeline.park_agent
 
     def test_agent_tap_parks_an_agent_that_already_had_focus(self):
-        self.parking_press(held=False, focused=True).assert_called_once_with(7)
+        self.parking_press(held=False, focused=True).assert_called_once_with(7, profile=self.cfg.agent)
         self.daemon.backend.transcribe.assert_not_called()
 
     def test_agent_tap_only_raises_an_agent_that_lacked_focus(self):
         self.parking_press(held=False, focused=False).assert_not_called()
-        self.daemon.pipeline.focus_agent.assert_called_once_with()
+        self.daemon.pipeline.focus_agent.assert_called_once_with(profile=self.cfg.agent)
 
     def test_agent_hold_dictates_into_a_focused_agent_instead_of_parking(self):
         self.parking_press(held=True, focused=True).assert_not_called()
@@ -244,6 +248,83 @@ class ControllerTests(unittest.TestCase):
         self.done()
         self.assertEqual(self.targets[0].calls[0][0], 'hello')
 
+    def configure_profiles(self):
+        original = self.cfg.agent
+        original.post_transcription_hook = "sed 's/^/Hermes: /'"
+        alternate = AgentConfig(profile_id='codex', name='Codex',
+                                app_id='dev.voicekey.Codex', terminal_title='Voicekey Codex',
+                                command=['codex'], park_workspace='codex',
+                                post_transcription_hook="sed 's/^/Codex: /'")
+        self.cfg.agent_profiles = {'hermes': original, 'codex': alternate}
+        self.daemon.agent_profiles = self.cfg.agent_profiles
+        return original, alternate
+
+    def test_selection_while_agent_opens_keeps_original_delivery_and_hook(self):
+        original, alternate = self.configure_profiles()
+        session, ready = self.closed_agent_hold()
+        self.assertEqual(session.agent_profile, original)
+        self.assertEqual(self.daemon.pipeline.open_agent.call_args.kwargs['profile'], original)
+        self.assertEqual(self.daemon.command('agent-select', args={'profile': 'codex'}),
+                         {'agent_profile': 'codex'})
+        self.assertEqual(self.daemon.status()['agent_title'], alternate.terminal_title)
+        self.assertTrue(self.daemon.status()['listening'])
+        self.assertEqual(session.agent_profile.profile_id, 'hermes')
+        self.release_agent(session)
+        wait_for(lambda: self.daemon.pipeline.opening.unfinished_tasks == 1)
+        ready(7, '')
+        self.done()
+        self.assertEqual(self.targets[0].calls[0][0], 'Hermes: hello')
+        self.daemon.pipeline.focus_agent.return_value = 7
+        self.agent_press(held=True)
+        self.assertEqual(self.daemon.pipeline.focus_agent.call_args.kwargs['profile'], alternate)
+        self.assertEqual(self.targets[1].calls[0][0], 'Codex: hello')
+
+    def test_selection_between_key_down_and_tap_release_parks_original_profile(self):
+        original, alternate = self.configure_profiles()
+        original.park_workspace = 'hermes'
+        self.daemon.pipeline.park_agent = Mock()
+        with patch('voicekey.daemon.focus.window_id', return_value=7):
+            self.key(1, ecodes.KEY_RIGHTALT)
+            self.key(1, ecodes.KEY_RIGHTMETA)
+        session = self.daemon.session
+        self.daemon.command('agent-select', args={'profile': 'codex'})
+        original.park_workspace = 'changed-after-key-down'
+        self.release_agent(session, held=False)
+        self.done()
+        parked = self.daemon.pipeline.park_agent.call_args
+        self.assertEqual(parked.args, (7,))
+        self.assertEqual(parked.kwargs['profile'].profile_id, 'hermes')
+        self.assertEqual(parked.kwargs['profile'].park_workspace, 'hermes')
+        self.assertIs(self.daemon.active_agent, alternate)
+        self.daemon.backend.transcribe.assert_not_called()
+
+    def test_explicit_inactive_profile_tap_raises_parks_or_opens_without_selection(self):
+        original, alternate = self.configure_profiles()
+        self.daemon.pipeline.park_agent = Mock()
+        for window, focused, expected in ((7, 3, 'raised'), (7, 7, 'parked'),
+                                          (None, 3, 'opening')):
+            with self.subTest(expected=expected), \
+                    patch('voicekey.daemon.focus.window_id', return_value=focused):
+                self.daemon.pipeline.focus_agent.reset_mock(return_value=False)
+                self.daemon.pipeline.focus_agent.return_value = window
+                self.daemon.pipeline.open_agent.reset_mock()
+                self.daemon.pipeline.park_agent.reset_mock()
+                result = self.daemon.command('agent-tap', args={'profile': 'codex'})
+                self.assertEqual(result, {'agent': expected})
+                self.daemon.pipeline.focus_agent.assert_called_once_with(profile=alternate)
+                if expected == 'parked':
+                    self.daemon.pipeline.park_agent.assert_called_once_with(7, profile=alternate)
+                else:
+                    self.daemon.pipeline.park_agent.assert_not_called()
+                if expected == 'opening':
+                    self.daemon.pipeline.open_agent.assert_called_once_with(profile=alternate)
+                else:
+                    self.daemon.pipeline.open_agent.assert_not_called()
+                self.assertEqual(self.daemon.agent_profile, 'hermes')
+                self.assertIs(self.daemon.active_agent, original)
+                self.assertIsNone(self.daemon.session)
+        self.daemon.backend.transcribe.assert_not_called()
+
     def test_dictation_is_not_held_behind_an_agent_window_still_opening(self):
         session, ready = self.closed_agent_hold()
         self.release_agent(session)
@@ -274,7 +355,7 @@ class ControllerTests(unittest.TestCase):
         self.daemon._on_key('fake', ecodes.KEY_RIGHTMETA, 0, at=pressed + 0.05)
         self.daemon._on_key('fake', ecodes.KEY_RIGHTALT, 0, at=pressed + 0.06)
         self.done()
-        self.daemon.pipeline.park_agent.assert_called_once_with(7)
+        self.daemon.pipeline.park_agent.assert_called_once_with(7, profile=self.cfg.agent)
         self.daemon.backend.transcribe.assert_not_called()
 
     def test_agent_tap_while_opening_never_claims_the_new_window(self):
@@ -327,19 +408,19 @@ class ControllerTests(unittest.TestCase):
     def test_agent_tap_command_raises_an_agent_that_lacked_focus_without_recording(self):
         reply, park = self.tap_command(focused=False)
         self.assertEqual(reply, {'agent': 'raised'})
-        self.daemon.pipeline.focus_agent.assert_called_once_with()
+        self.daemon.pipeline.focus_agent.assert_called_once_with(profile=self.cfg.agent)
         park.assert_not_called()
         self.assertEqual(self.targets, [])
 
     def test_agent_tap_command_parks_an_agent_that_already_had_focus(self):
         reply, park = self.tap_command(focused=True)
         self.assertEqual(reply, {'agent': 'parked'})
-        park.assert_called_once_with(7)
+        park.assert_called_once_with(7, profile=self.cfg.agent)
 
     def test_agent_tap_command_opens_a_closed_agent(self):
         reply, park = self.tap_command(focused=False, opening=True)
         self.assertEqual(reply, {'agent': 'opening'})
-        self.daemon.pipeline.open_agent.assert_called_once_with()
+        self.daemon.pipeline.open_agent.assert_called_once_with(profile=self.cfg.agent)
         park.assert_not_called()
 
     def test_agent_tap_command_is_refused_during_dictation(self):
@@ -499,6 +580,6 @@ class ControllerTests(unittest.TestCase):
             wav.writeframes(b'\0\0' * 8000)
         with patch('voicekey.daemon.target_mod.bind', side_effect=self.fake_bind) as bind:
             self.daemon.replay(path, 'agent')
-        self.daemon.pipeline.focus_agent.assert_called_once_with()
+        self.daemon.pipeline.focus_agent.assert_called_once_with(profile=self.cfg.agent)
         self.assertIn('activation_wait', bind.call_args.kwargs, "bound as the agent window")
         self.assertEqual(self.targets[0].calls[0][0], 'hello')

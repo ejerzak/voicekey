@@ -13,7 +13,7 @@ from unittest.mock import Mock, patch
 from evdev import ecodes
 
 from voicekey.control import ControlServer, request
-from voicekey.config import Config
+from voicekey.config import AgentConfig, Config
 from voicekey.daemon import Daemon
 from voicekey.listener import KeyboardListener
 from voicekey.recovery import Journal
@@ -24,6 +24,9 @@ class ControlTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+        state = patch.dict(os.environ, {'XDG_STATE_HOME': self.tmp.name})
+        state.start()
+        self.addCleanup(state.stop)
         self.path = Path(self.tmp.name)/'runtime'/'control.sock'
         self.server = ControlServer(self.path)
         self.server.start()
@@ -130,6 +133,23 @@ class ControlTests(unittest.TestCase):
             pass
         self.assertEqual(reply, {'type': 'reply', 'id': 1, 'error': None, 'agent': 'parked'})
 
+    def test_profile_selection_and_explicit_tap_retain_arguments_over_socket(self):
+        self.assertIn('agent-profiles', request('status', self.path)['capabilities'])
+        for command in ('agent-select', 'agent-tap'):
+            with self.subTest(command=command):
+                client, stream = self.connect()
+                client.sendall((json.dumps({'command': command, 'id': 4,
+                                            'args': {'profile': 'codex'}}) + '\n').encode())
+                wait_for(lambda: not self.server.commands.empty())
+                handler = Mock(return_value={'agent_profile': 'codex'})
+                self.server.drain(handler)
+                self.assertEqual(handler.call_args.args, (command,))
+                self.assertEqual(handler.call_args.kwargs['args'], {'profile': 'codex'})
+                while (reply := json.loads(stream.readline()))['type'] != 'reply':
+                    pass
+                self.assertIsNone(reply['error'])
+                self.assertEqual(reply['agent_profile'], 'codex')
+
     def test_draft_toggle_commands_are_advertised_and_update_socket_status(self):
         daemon = Daemon(Config(), journal=Journal(self.tmp.name + '/sessions'))
         self.addCleanup(daemon.close)
@@ -150,10 +170,96 @@ class DaemonControlTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+        state = patch.dict(os.environ, {'XDG_STATE_HOME': self.tmp.name})
+        state.start()
+        self.addCleanup(state.stop)
         self.daemon = Daemon(Config(), journal=Journal(self.tmp.name))
         self.addCleanup(self.daemon.close)
         self.daemon.backend = Mock()
         self.daemon.vad = Mock()
+
+    def configure_profiles(self):
+        d = self.daemon
+        alternate = AgentConfig(profile_id='codex', name='Codex',
+                                app_id='dev.voicekey.Codex', terminal_title='Voicekey Codex',
+                                command=['codex'])
+        d.cfg.agent_profiles = {'hermes': d.cfg.agent, 'codex': alternate}
+        d.agent_profiles = d.cfg.agent_profiles
+        return alternate
+
+    def test_profile_selection_persists_and_status_exposes_profile_metadata(self):
+        d = self.daemon
+        alternate = self.configure_profiles()
+        with patch.object(d.pipeline, 'open_agent') as opened, \
+                patch.object(d, '_ensure_models') as models:
+            d.model_state = 'unloaded'
+            self.assertEqual(d.command('agent-select', args={'profile': 'codex'}),
+                             {'agent_profile': 'codex'})
+        opened.assert_not_called()
+        models.assert_not_called()
+        self.assertEqual(d.model_state, 'unloaded')
+        status = d.status()
+        self.assertEqual(status['agent_profile'], 'codex')
+        self.assertEqual(status['agent_title'], alternate.terminal_title)
+        self.assertIn({'id': 'codex', 'name': 'Codex', 'app_id': alternate.app_id,
+                       'terminal_title': alternate.terminal_title, 'transport': 'local'},
+                      status['agent_profiles'])
+        restarted = Daemon(d.cfg, journal=Journal(self.tmp.name + '/restarted'))
+        self.addCleanup(restarted.close)
+        self.assertEqual(restarted.agent_profile, 'codex')
+        self.assertEqual(restarted.active_agent, alternate)
+        del d.cfg.agent_profiles['codex']
+        stale = Daemon(d.cfg, journal=Journal(self.tmp.name + '/stale'))
+        self.addCleanup(stale.close)
+        self.assertEqual(stale.agent_profile, 'hermes')
+
+    def test_profile_selection_is_allowed_during_all_capture_types_and_pending_work(self):
+        d = self.daemon
+        self.configure_profiles()
+        for attribute in ('session', 'persistent', 'client_capture'):
+            with self.subTest(capture=attribute):
+                capture = Mock()
+                setattr(d, attribute, capture)
+                try:
+                    for profile in ('codex', 'hermes'):
+                        d.command('agent-select', args={'profile': profile})
+                        self.assertEqual(d.agent_profile, profile)
+                        self.assertIs(getattr(d, attribute), capture)
+                    self.assertEqual(capture.mock_calls, [])
+                finally:
+                    setattr(d, attribute, None)
+        identity = d.pipeline.ledger.admit(1)
+        try:
+            d.command('agent-select', args={'profile': 'codex'})
+            self.assertEqual(d.agent_profile, 'codex')
+            self.assertTrue(d.pipeline.ledger.busy)
+        finally:
+            d.pipeline.ledger.complete(identity, 'dropped')
+
+    def test_invalid_profile_arguments_do_not_change_selection_or_saved_state(self):
+        d = self.daemon
+        self.configure_profiles()
+        d.command('agent-select', args={'profile': 'codex'})
+        path = Path(self.tmp.name) / 'voicekey' / 'agent-profile.json'
+        saved = path.read_bytes()
+        for command in ('agent-select', 'agent-tap'):
+            arguments = ({'profile': 'removed'}, {'profile': None},
+                         {'profile': ['codex']}, {'profile': 'hermes', 'extra': 1})
+            if command == 'agent-select':
+                arguments += ({},)
+            for args in arguments:
+                with self.subTest(command=command, args=args):
+                    with self.assertRaises(ValueError):
+                        d.command(command, args=args)
+                    self.assertEqual(d.agent_profile, 'codex')
+                    self.assertEqual(path.read_bytes(), saved)
+
+    def test_failed_selection_save_keeps_current_profile(self):
+        self.configure_profiles()
+        with patch('voicekey.daemon.agent_profiles.save_selection', side_effect=OSError('disk full')):
+            with self.assertRaisesRegex(ValueError, 'save'):
+                self.daemon.command('agent-select', args={'profile': 'codex'})
+        self.assertEqual(self.daemon.agent_profile, 'hermes')
 
     def test_draft_toggle_updates_idle_daemon_without_starting_capture(self):
         d = self.daemon
