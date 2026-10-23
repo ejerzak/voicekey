@@ -15,15 +15,15 @@ CONFIG="$HOME/.config/voicekey/config.toml"
 UNIT="$HOME/.config/systemd/user/voicekey.service"
 PLUGINS="${XDG_CONFIG_HOME:-$HOME/.config}/dms/plugins"
 DESKTOP="${XDG_DATA_HOME:-$HOME/.local/share}/applications/dev.voicekey.Hermes.desktop"
-HERMES_ICON="${HERMES_HOME:-$HOME/.hermes}/hermes-agent/apps/desktop/assets/icon-dark.png"
+ICON="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/256x256/apps/dev.voicekey.Hermes.png"
 
 # The agent terminal's desktop entry, named for its app ID (TERMINAL_APP_ID in
 # voicekey/agent.py): docks show Hermes as its own app, so it can be pinned,
 # and launching it is an agent-key tap. Written rather than linked because
-# Exec needs this venv's absolute path.
+# Exec needs this venv's absolute path. The icon ships in contrib/hermes
+# (Hermes's own, MIT) because Hermes often runs on another machine.
 install_desktop_entry() {
-    local icon=utilities-terminal
-    if [[ -f "$HERMES_ICON" ]]; then icon="$HERMES_ICON"; fi
+    install -Dm644 "$HERE/contrib/hermes/dev.voicekey.Hermes.png" "$ICON"
     mkdir -p "$(dirname "$DESKTOP")"
     cat > "$DESKTOP" <<EOF
 [Desktop Entry]
@@ -31,11 +31,12 @@ Type=Application
 Name=Voicekey Hermes
 Comment=Open or raise the Hermes terminal, like a tap of the agent key
 Exec="$VENV/bin/python" -m voicekey --control agent-tap
-Icon=$icon
+Icon=dev.voicekey.Hermes
 StartupWMClass=dev.voicekey.Hermes
 Terminal=false
 EOF
     echo "  DESKTOP: $DESKTOP"
+    echo "  ICON: $ICON"
 }
 
 # Link contrib/dms/NAME into DMS's plugins; refuse to replace anything else.
@@ -115,7 +116,7 @@ install_plugins() {
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
     echo "  Would create $VENV (python 3.12 via uv), install $HERE, download models,"
     echo "  link $UNIT -> $HERE/voicekey.service, enable voicekey.service and run --check,"
-    echo "  and write the Hermes terminal's desktop entry $DESKTOP"
+    echo "  and write the Hermes terminal's desktop entry $DESKTOP and icon $ICON"
     echo "  If dms is installed, link its plugins into $PLUGINS and enable them when DMS is running."
     exit 0
 fi

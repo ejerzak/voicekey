@@ -438,9 +438,10 @@ With DMS, the [Hermes Sidebar](#dms-bar-widget) plugin gives
 the terminal's dock icon the same tap behavior.
 
 `./install.sh` writes a desktop entry for that app ID,
-`~/.local/share/applications/dev.voicekey.Hermes.desktop`, so docks show the
-terminal as its own app, with Hermes's icon when Hermes is installed, rather
-than as one more Ghostty window. Pin it to give it a fixed place in the dock;
+`~/.local/share/applications/dev.voicekey.Hermes.desktop`, and installs
+Hermes's icon from `contrib/hermes` into `~/.local/share/icons/hicolor`, so
+docks show the terminal as its own app, with Hermes's icon even when Hermes
+runs on another machine, rather than as one more Ghostty window. Pin it to give it a fixed place in the dock;
 while Hermes is closed, clicking the pin opens it.
 
 ## Diagnostics
