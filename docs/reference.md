@@ -437,7 +437,9 @@ identity_file = "~/.ssh/id_ed25519"
 Commands are argument arrays; arguments are treated literally, without shell
 expansion. Use an absolute executable path if the command is installed outside the systemd
 user service's `PATH`; an interactive shell finding it does not establish
-that the service can. For remote profiles, command and working-directory
+that the service can. Local agent sessions inherit the systemd user manager's
+environment; Voicekey does not copy the launching shell's PATH into their
+services. For remote profiles, command and working-directory
 paths refer to the remote machine; `identity_file` is local. Recording and
 transcription stay local. OpenSSH uses strict host-key checking, and the local
 terminal forwards typed text over SSH. If a profile is unavailable, Voicekey
@@ -498,11 +500,12 @@ another profile is selected. Such a click leaves the selection unchanged.
 
 `./install.sh` writes `dev.voicekey.Agent.desktop` and its icon under
 `~/.local/share/applications` and `~/.local/share/icons/hicolor`. Pin
-**Voicekey Agent** to launch the selected profile. All named profiles share
-that app identity; the window titles distinguish their running terminals.
+**Voicekey Agent** to launch the selected profile. Named profiles share
+that app identity by default; window titles distinguish their running terminals.
 The installer retains `dev.voicekey.Hermes.desktop` and Hermes's icon for
-legacy configs and existing pins. Both launchers act like the agent key and
-use the selected profile.
+legacy configs and existing pins. That launcher always opens the `hermes`
+profile, without changing the selected profile. It reports an error if no
+profile named `hermes` is configured.
 
 ## Diagnostics
 

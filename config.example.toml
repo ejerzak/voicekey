@@ -107,7 +107,9 @@ transport = "local"
 working_directory = "~/.local/share/voicekey/hermes"
 terminal_title = "Voicekey Hermes"
 # Socket/session/window identities are generated from the profile ID by default.
-# All named profiles use app ID dev.voicekey.Agent; titles distinguish windows.
+# Named profiles default to dev.voicekey.Agent and the generic Agent icon.
+# To keep the legacy Hermes icon and matching window rule when migrating, set:
+# app_id = "dev.voicekey.Hermes"
 # For Hermes on another machine over Tailscale, set:
 # transport = "ssh-over-tailscale"
 # remote_host = "desktop"

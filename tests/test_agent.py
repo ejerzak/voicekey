@@ -16,7 +16,7 @@ def completed(returncode: int = 0, stdout: str = "", stderr: str = ""):
 
 class AgentTests(unittest.TestCase):
     @patch("voicekey.agent._run", return_value=completed())
-    @patch("voicekey.agent._require", side_effect=lambda name: f"/usr/bin/{name}")
+    @patch("voicekey.agent.resolve_executable", side_effect=lambda name: f"/usr/bin/{name}")
     def test_remote_tmux_uses_strict_openssh_over_tailscale_and_stdin(
         self, require, run
     ):
@@ -83,7 +83,7 @@ class AgentTests(unittest.TestCase):
     @patch("voicekey.agent._client_count", side_effect=[1, 2])
     @patch("voicekey.agent._terminal_window_open", side_effect=[False, True])
     @patch("voicekey.agent._run", return_value=completed())
-    @patch("voicekey.agent._require", side_effect=lambda name: f"/usr/bin/{name}")
+    @patch("voicekey.agent.resolve_executable", side_effect=lambda name: f"/usr/bin/{name}")
     def test_remote_terminal_uses_verified_ssh_and_allocates_tty(
         self, require, run, window_open, client_count, is_file, stat
     ):
@@ -112,7 +112,7 @@ class AgentTests(unittest.TestCase):
         self.assertIn("--class=dev.voicekey.Hermes", argv)
 
     @patch("voicekey.agent.focus.compositor", return_value="niri")
-    @patch("voicekey.agent._require", return_value="/usr/bin/niri")
+    @patch("voicekey.agent.resolve_executable", return_value="/usr/bin/niri")
     @patch(
         "voicekey.agent._run",
         return_value=completed(
@@ -128,7 +128,7 @@ class AgentTests(unittest.TestCase):
 
     @patch("voicekey.agent.focus.compositor", return_value="niri")
     @patch("voicekey.agent._terminal_window", return_value={"id": 7, "workspace_id": 1})
-    @patch("voicekey.agent._require", return_value="/usr/bin/niri")
+    @patch("voicekey.agent.resolve_executable", return_value="/usr/bin/niri")
     @patch("voicekey.agent._run", return_value=completed())
     def test_focus_raises_the_titled_terminal_on_niri(self, run, require, window, compositor):
         self.assertEqual(agent._focus_terminal(AgentConfig()), 7)
@@ -151,7 +151,7 @@ class AgentTests(unittest.TestCase):
         return run.call_args_list[1:]
 
     @patch("voicekey.agent.focus.compositor", return_value="niri")
-    @patch("voicekey.agent._require", return_value="/usr/bin/niri")
+    @patch("voicekey.agent.resolve_executable", return_value="/usr/bin/niri")
     @patch("voicekey.agent._run")
     def test_parked_terminal_comes_to_the_focused_workspace(self, run, require, compositor):
         self.assertEqual(self._raise_parked(run, 1), [
@@ -160,7 +160,7 @@ class AgentTests(unittest.TestCase):
         ])
 
     @patch("voicekey.agent.focus.compositor", return_value="niri")
-    @patch("voicekey.agent._require", return_value="/usr/bin/niri")
+    @patch("voicekey.agent.resolve_executable", return_value="/usr/bin/niri")
     @patch("voicekey.agent._run")
     def test_terminal_on_another_monitor_moves_to_the_focused_one(self, run, require, compositor):
         self.assertEqual(self._raise_parked(run, 5), [
@@ -169,12 +169,12 @@ class AgentTests(unittest.TestCase):
         ])
 
     @patch("voicekey.agent.focus.compositor", return_value="niri")
-    @patch("voicekey.agent._require", return_value="/usr/bin/niri")
+    @patch("voicekey.agent.resolve_executable", return_value="/usr/bin/niri")
     @patch("voicekey.agent._run")
     def test_terminal_already_on_the_focused_workspace_is_only_focused(self, run, require, compositor):
         self.assertEqual(self._raise_parked(run, 3), [self._action("focus-window", "--id", "7")])
 
-    @patch("voicekey.agent._require", return_value="/usr/bin/niri")
+    @patch("voicekey.agent.resolve_executable", return_value="/usr/bin/niri")
     @patch("voicekey.agent._run", return_value=completed())
     def test_park_sends_the_terminal_back_without_moving_focus(self, run, require):
         agent.park_terminal(AgentConfig(park_workspace="hermes"), 7, deadline=time.monotonic() + 1)
@@ -253,7 +253,7 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(argv[-1], ".local/share/voicekey/hermes")
         self.assertNotIn("/home/", " ".join(argv), "no local path reaches the remote")
 
-    @patch("voicekey.agent._require", return_value="/opt/hermes")
+    @patch("voicekey.agent.resolve_executable", return_value="/opt/hermes")
     @patch("voicekey.agent._workspace", return_value="/work")
     @patch("voicekey.agent._tmux")
     @patch("voicekey.agent._ensure_server")
@@ -288,7 +288,7 @@ class AgentTests(unittest.TestCase):
         )
 
     @patch("voicekey.agent._run", return_value=completed())
-    @patch("voicekey.agent._require", side_effect=lambda name: f"/usr/bin/{name}")
+    @patch("voicekey.agent.resolve_executable", side_effect=lambda name: f"/usr/bin/{name}")
     @patch(
         "voicekey.agent._tmux",
         side_effect=[completed(), completed(stdout="12345\n")],
@@ -326,7 +326,7 @@ class AgentTests(unittest.TestCase):
 
     @patch("voicekey.agent._server_running", return_value=True)
     @patch("voicekey.agent._run", return_value=completed())
-    @patch("voicekey.agent._require", side_effect=lambda name: f"/usr/bin/{name}")
+    @patch("voicekey.agent.resolve_executable", side_effect=lambda name: f"/usr/bin/{name}")
     def test_tmux_server_has_stable_supervised_unit(self, require, run, running):
         agent._start_server(AgentConfig())
 
@@ -363,7 +363,7 @@ class CancellationTests(unittest.TestCase):
             agent._operation.reset(token)
 
 class AgentProfileTests(unittest.TestCase):
-    @patch("voicekey.agent._require", return_value="/opt/bin/codex with spaces")
+    @patch("voicekey.agent.resolve_executable", return_value="/opt/bin/codex with spaces")
     @patch("voicekey.agent._workspace", return_value="/work")
     @patch("voicekey.agent._tmux")
     @patch("voicekey.agent._ensure_server")
@@ -389,7 +389,7 @@ class AgentProfileTests(unittest.TestCase):
         invocation = next(c for c in tmux.call_args_list if c.args[1] == "new-session")
         self.assertEqual(invocation.args[-1], "/home/alice/bin/claude --continue")
 
-    @patch("voicekey.agent._require", side_effect=lambda command: (_ for _ in ()).throw(agent.AgentError("codex not found")) if command == "codex" else "/usr/bin/" + command)
+    @patch("voicekey.agent.resolve_executable", side_effect=lambda command: (_ for _ in ()).throw(agent.AgentError("codex not found")) if command == "codex" else "/usr/bin/" + command)
     def test_local_diagnostics_check_the_actual_command(self, require):
         self.assertEqual(agent.check_target(AgentConfig(command=["codex", "--resume"])), "codex not found")
         self.assertIn(call("codex"), require.call_args_list)
@@ -403,19 +403,36 @@ class AgentProfileTests(unittest.TestCase):
         self.assertEqual(command[-1], "/opt/my agent;literal")
         self.assertNotIn("/opt/my agent;literal", command[2])
 
-    def test_minimal_daemon_path_finds_user_tools_and_explicit_paths(self):
+    def test_executable_lookup_uses_path_or_explicit_paths(self):
         import os
         import tempfile
         from pathlib import Path
         with tempfile.TemporaryDirectory() as directory:
-            binary = Path(directory) / ".local/bin/codex"
+            binary = Path(directory) / "bin/voicekey-test-agent"
             binary.parent.mkdir(parents=True)
             binary.write_text("#!/bin/sh\nexit 0\n")
             binary.chmod(0o700)
-            with patch.dict(os.environ, {"HOME": directory, "PATH": "/usr/bin"}):
-                self.assertEqual(agent._require("codex"), str(binary))
-                self.assertEqual(agent._require("~/.local/bin/codex"), str(binary))
-                self.assertEqual(agent._require(str(binary)), str(binary))
+            with patch.dict(os.environ, {"PATH": "/usr/bin"}):
+                with self.assertRaises(agent.AgentError):
+                    agent.resolve_executable("voicekey-test-agent")
+                self.assertEqual(agent.resolve_executable(str(binary)), str(binary))
+                with patch("voicekey.agent.os.path.expanduser", return_value=str(binary)):
+                    self.assertEqual(agent.resolve_executable("~/bin/voicekey-test-agent"), str(binary))
+            with patch.dict(os.environ, {"PATH": str(binary.parent)}):
+                self.assertEqual(agent.resolve_executable("voicekey-test-agent"), str(binary))
+
+    @patch("voicekey.agent._server_running", return_value=True)
+    @patch("voicekey.agent.resolve_executable", side_effect=lambda name: f"/usr/bin/{name}")
+    @patch("voicekey.agent.subprocess.run", return_value=completed())
+    def test_tmux_service_does_not_override_manager_path(self, run, resolve, running):
+        import os
+        caller_path = "/tmp/coding-agent-private-tools:/usr/bin"
+        with patch.dict(os.environ, {"PATH": caller_path}):
+            agent._start_server(AgentConfig())
+        argv = run.call_args.args[0]
+        self.assertNotIn(caller_path, " ".join(argv))
+        self.assertFalse(any(arg.startswith("--setenv=PATH=") for arg in argv))
+        self.assertNotIn("env", run.call_args.kwargs)
 
     @patch("voicekey.agent._niri_list", return_value=[
         {"id": 1, "app_id": "dev.voicekey.Agent", "title": "Voicekey hermes"},

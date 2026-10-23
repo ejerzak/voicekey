@@ -19,9 +19,9 @@ ICON="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/256x256/apps/dev.voicek
 AGENT_DESKTOP="${XDG_DATA_HOME:-$HOME/.local/share}/applications/dev.voicekey.Agent.desktop"
 AGENT_ICON="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps/dev.voicekey.Agent.svg"
 
-# Generic named-profile launcher plus the legacy Hermes identity. Both launch
-# the selected profile, like an agent-key tap. Keep the legacy entry/icon for
-# existing flat configurations and dock pins. Exec needs this venv's path.
+# The generic launcher opens the selected profile; the Hermes launcher always
+# opens the hermes profile. Keep its legacy identity for existing dock pins.
+# Exec needs this venv's path.
 install_desktop_entry() {
     install -Dm644 "$HERE/contrib/hermes/dev.voicekey.Hermes.png" "$ICON"
     mkdir -p "$(dirname "$DESKTOP")"
@@ -30,7 +30,7 @@ install_desktop_entry() {
 Type=Application
 Name=Voicekey Hermes
 Comment=Open or raise the Hermes terminal, like a tap of the agent key
-Exec="$VENV/bin/python" -m voicekey --control agent-tap
+Exec="$VENV/bin/python" -m voicekey --control agent-tap --agent-profile hermes
 Icon=dev.voicekey.Hermes
 StartupWMClass=dev.voicekey.Hermes
 Terminal=false

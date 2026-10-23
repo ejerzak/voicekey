@@ -35,20 +35,12 @@ class AgentError(Exception):
     pass
 
 
-def _command_path() -> str:
-    """Include conventional user tools when systemd supplies a minimal PATH."""
-    inherited = os.environ.get("PATH", os.defpath).split(os.pathsep)
-    extra = [os.path.expanduser(path) for path in (
-        "~/.local/bin", "~/.npm-global/bin",
-    )]
-    return os.pathsep.join(dict.fromkeys([*inherited, *extra]))
-
-
-def _require(command: str) -> str:
+def resolve_executable(command: str) -> str:
+    """Resolve an executable against PATH, or an explicitly configured path."""
     command = os.path.expanduser(command)
     if "/" in command:
         command = os.path.abspath(command)
-    path = shutil.which(command, path=_command_path())
+    path = shutil.which(command)
     if path is None:
         raise AgentError(
             f"{command} not found — install it or configure an executable path"
@@ -75,7 +67,6 @@ def _run(
             capture_output=True,
             text=True,
             timeout=timeout,
-            env={**os.environ, "PATH": _command_path()},
         )
     except subprocess.TimeoutExpired:
         raise AgentError(f"command timed out after {timeout:.0f}s: {argv[0]}")
@@ -99,8 +90,8 @@ def _remote_destination(cfg: AgentConfig) -> str:
 
 def _ssh_argv(cfg: AgentConfig, *, allocate_tty: bool = False) -> list[str]:
     """Build strict OpenSSH-over-Tailscale arguments, bypassing system config."""
-    ssh = _require("ssh")
-    tailscale = _require("tailscale")
+    ssh = resolve_executable("ssh")
+    tailscale = resolve_executable("tailscale")
     known_hosts = Path(os.path.expanduser("~/.ssh/known_hosts"))
     argv = [
         ssh,
@@ -146,7 +137,7 @@ def _remote_run(
 
 
 def _target_executable(cfg: AgentConfig, command: str) -> str:
-    return command if _remote(cfg) else _require(command)
+    return command if _remote(cfg) else resolve_executable(command)
 
 
 def _target_run(
@@ -188,11 +179,11 @@ def check_target(cfg: AgentConfig) -> str | None:
     """Check the actual configured executable and its local/remote support tools."""
     try:
         if not _remote(cfg):
-            _require("systemd-run")
+            resolve_executable("systemd-run")
             if cfg.open_terminal:
-                _require(cfg.terminal)
-            _require("tmux")
-            _require(cfg.command[0])
+                resolve_executable(cfg.terminal)
+            resolve_executable("tmux")
+            resolve_executable(cfg.command[0])
             return None
         result = _remote_run(
             cfg,
@@ -249,7 +240,6 @@ def _start_server(cfg: AgentConfig) -> None:
             "--collect",
             f"--unit={unit}",
             f"--description=Voicekey {cfg.name} tmux server",
-            *([] if _remote(cfg) else [f"--setenv=PATH={_command_path()}"]),
             "--property=Restart=always",
             "--property=RestartSec=2s",
             "--",
@@ -331,7 +321,7 @@ def _ensure_session(cfg: AgentConfig) -> bool:
         executable = (
             _remote_executable(cfg, cfg.command[0])
             if _remote(cfg)
-            else _require(cfg.command[0])
+            else resolve_executable(cfg.command[0])
         )
         command = shlex.join([executable, *cfg.command[1:]])
         _tmux(
@@ -368,8 +358,8 @@ def _ensure_terminal(cfg: AgentConfig) -> bool:
     if cfg.terminal != "ghostty":
         raise AgentError(f"unsupported agent terminal: {cfg.terminal}")
 
-    systemd_run = _require("systemd-run")
-    terminal = _require(cfg.terminal)
+    systemd_run = resolve_executable("systemd-run")
+    terminal = resolve_executable(cfg.terminal)
     environment = [
         f"--setenv={name}={os.environ[name]}"
         for name in ("WAYLAND_DISPLAY", "DISPLAY", "XDG_RUNTIME_DIR")
@@ -397,7 +387,7 @@ def _ensure_terminal(cfg: AgentConfig) -> bool:
         ]
     else:
         attach_command = [
-            _require("tmux"),
+            resolve_executable("tmux"),
             "-L",
             cfg.tmux_socket,
             "attach-session",
@@ -447,7 +437,7 @@ def _terminal_window_open(cfg: AgentConfig) -> bool:
 def _niri_list(cfg: AgentConfig, what: str) -> list[dict]:
     """niri's JSON listing of WHAT (windows, workspaces)."""
     result = _run(
-        [_require("niri"), "msg", "--json", what],
+        [resolve_executable("niri"), "msg", "--json", what],
         timeout=cfg.command_timeout,
         check=False,
     )
@@ -464,7 +454,7 @@ def _niri_list(cfg: AgentConfig, what: str) -> list[dict]:
 
 
 def _niri_action(cfg: AgentConfig, *argv: str) -> None:
-    _run([_require("niri"), "msg", "action", *argv], timeout=cfg.command_timeout)
+    _run([resolve_executable("niri"), "msg", "action", *argv], timeout=cfg.command_timeout)
 
 
 def _terminal_window(cfg: AgentConfig) -> dict | None:

@@ -194,7 +194,7 @@ def check(cfg) -> int:
         print(f"command: {command}: OK")
     if missing:
         print(f"missing command(s): {', '.join(missing)}", file=sys.stderr)
-    from .agent import AgentError, _require, check_target
+    from .agent import AgentError, resolve_executable, check_target
     agent_error = False
     for profile_id, profile in profiles.items():
         local_required = {"systemd-run"}
@@ -207,7 +207,7 @@ def check(cfg) -> int:
         profile_missing = []
         for command in sorted(local_required):
             try:
-                resolved = _require(command)
+                resolved = resolve_executable(command)
                 print(f"agent command [{profile_id}]: {resolved}: OK")
             except AgentError:
                 profile_missing.append(command)

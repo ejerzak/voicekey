@@ -57,7 +57,8 @@ class DesktopEntryTests(unittest.TestCase):
                 desktop = base / f'applications/dev.voicekey.{identity}.desktop'
                 text = desktop.read_text()
                 self.assertIn(f'StartupWMClass=dev.voicekey.{identity}\n', text)
-                self.assertIn(f'Exec="{env["VENV"]}/bin/python" -m voicekey --control agent-tap\n', text)
+                profile_arg = " --agent-profile hermes" if identity == "Hermes" else ""
+                self.assertIn(f'Exec="{env["VENV"]}/bin/python" -m voicekey --control agent-tap{profile_arg}\n', text)
                 if shutil.which('desktop-file-validate'):
                     subprocess.run(['desktop-file-validate', str(desktop)],
                                    capture_output=True, text=True, check=True)
